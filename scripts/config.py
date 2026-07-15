@@ -66,9 +66,22 @@ STREET_LABEL = 2
 # background label in the classification band).
 NODATA_VALUE = BACKGROUND_LABEL
 
-# Whether to detect and brightness-normalize shadowed pixels within the
-# road/bike-lane mask before writing output tiles.
-APPLY_SHADOW_CORRECTION = True
+# How to handle shadowed pixels within the road/bike-lane mask:
+#   "correct" -- brightness-normalize them to match nearby sunlit pixels
+#                (see scripts/shadows.py)
+#   "cut"     -- drop them entirely (zeroed to NODATA_VALUE, same as
+#                background outside the buffer), rather than attempt
+#                correction -- for imagery where shadow correction still
+#                distorts too much of the tile to be usable
+SHADOW_HANDLING = "correct"
+
+# When SHADOW_HANDLING is "cut", pixels within this margin of the detected
+# shadow mask are cut too, not just the mask itself. Real shadow edges are
+# soft (penumbra); Otsu's threshold draws a hard line through that gradient,
+# so pixels just outside the detected mask can still be partially shadowed.
+# Cutting only exactly at the mask boundary would keep those, leaving a
+# sharp edge between "cut" and "retained but still slightly shadowed".
+SHADOW_CUT_MARGIN_M = 1.0
 
 # Integer labels written to the shadow band.
 NOT_SHADOW_LABEL = 0

@@ -1,9 +1,10 @@
 """Apply buffered bike lane / street masks to satellite imagery tiles.
 
-Pixels outside either buffer are zeroed out, shadowed pixels within the
-buffers are brightness-normalized, and two extra bands are appended: one
-classifying each pixel as bikelane/street, the other flagging whether it was
-shadowed.
+Pixels outside either buffer are zeroed out. Shadowed pixels within the
+buffers are handled per `SHADOW_HANDLING`: either brightness-normalized
+("correct") or dropped entirely ("cut"), same as background. Two extra
+bands are appended: one classifying each pixel as bikelane/street, the
+other flagging whether it was shadowed.
 """
 
 from pathlib import Path
@@ -11,13 +12,16 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from rasterio.enums import ColorInterp
+from scipy.ndimage import binary_dilation
 from shapely.geometry.base import BaseGeometry
+from skimage.morphology import disk
 
 from scripts.config import (
-    APPLY_SHADOW_CORRECTION,
     BIKE_LANE_LABEL,
     NODATA_VALUE,
     NOT_SHADOW_LABEL,
+    SHADOW_CUT_MARGIN_M,
+    SHADOW_HANDLING,
     SHADOW_LABEL,
     STREET_LABEL,
 )
@@ -36,13 +40,20 @@ def filter_tile(
     """Mask a single imagery tile to its bike lane/street buffers and write it out.
 
     Output keeps the source's full resolution (compress="deflate", lossless);
-    pixels outside both buffers are zeroed out. If APPLY_SHADOW_CORRECTION is
-    set, shadowed pixels within the buffers are brightness-normalized to
-    match nearby sunlit pixels (see scripts/shadows.py), so retained pixel
-    values are no longer guaranteed to be bit-identical to the source there.
-    Two extra bands are appended: a classification band (0=background,
-    1=bikelane, 2=street; bikelane takes priority where the buffers overlap)
-    and a shadow band (0=not shadowed, 1=shadowed).
+    pixels outside both buffers are zeroed out. Shadowed pixels within the
+    buffers are handled per `SHADOW_HANDLING`: "correct" brightness-normalizes
+    them to match nearby sunlit pixels (see scripts/shadows.py), so retained
+    pixel values are no longer guaranteed to be bit-identical to the source
+    there; "cut" drops them entirely, same as background outside the buffer --
+    and drops a further `SHADOW_CUT_MARGIN_M` beyond the detected mask too,
+    since a real shadow's edge is a soft penumbra that the mask's hard
+    threshold cuts through, so pixels just outside it can still be partially
+    shadowed. Two extra bands are appended: a classification band
+    (0=background, 1=bikelane, 2=street; bikelane takes priority where the
+    buffers overlap, reflecting whichever pixels were actually retained) and
+    a shadow band (0=not shadowed, 1=shadowed, reflecting detection only,
+    not the cut margin; populated either way, even where "cut" means those
+    pixels end up as background/nodata in the other bands).
     """
     with rasterio.open(tile_path) as src:
         profile = src.profile.copy()
@@ -53,17 +64,24 @@ def filter_tile(
         street_mask = rasterize_mask(buffered_by_category["street"], src.transform, shape)
         bikelane_mask = rasterize_mask(buffered_by_category["bikelane"], src.transform, shape)
 
+    combined_mask = street_mask | bikelane_mask
+
+    shadow_mask = clean_shadow_mask(detect_shadow_mask(data[:3], combined_mask), pixel_size_m)
+    shadow_band = np.full(shape, NOT_SHADOW_LABEL, dtype=data.dtype)
+    shadow_band[shadow_mask] = SHADOW_LABEL
+
+    if SHADOW_HANDLING == "cut":
+        margin_px = max(1, round(SHADOW_CUT_MARGIN_M / pixel_size_m))
+        cut_mask = binary_dilation(shadow_mask, structure=disk(margin_px))
+        street_mask = street_mask & ~cut_mask
+        bikelane_mask = bikelane_mask & ~cut_mask
+        combined_mask = combined_mask & ~cut_mask
+    else:
+        data = correct_shadows(data, shadow_mask, combined_mask, pixel_size_m)
+
     classification = np.zeros(shape, dtype=data.dtype)
     classification[street_mask] = STREET_LABEL
     classification[bikelane_mask] = BIKE_LANE_LABEL
-
-    combined_mask = street_mask | bikelane_mask
-
-    shadow_band = np.full(shape, NOT_SHADOW_LABEL, dtype=data.dtype)
-    if APPLY_SHADOW_CORRECTION:
-        shadow_mask = clean_shadow_mask(detect_shadow_mask(data[:3], combined_mask), pixel_size_m)
-        data = correct_shadows(data, shadow_mask, combined_mask, pixel_size_m)
-        shadow_band[shadow_mask] = SHADOW_LABEL
 
     filtered_bands = np.where(combined_mask, data, NODATA_VALUE).astype(data.dtype)
     output = np.concatenate(

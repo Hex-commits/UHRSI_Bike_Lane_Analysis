@@ -4,7 +4,7 @@ Filters Münster aerial imagery down to the bike lane / street network, for ML t
 
 - bike lane + street geometry from OpenStreetMap
 - imagery masked to a buffer around that geometry
-- shadows detected and brightness-corrected
+- shadows detected, then either brightness-corrected or cut entirely (configurable)
 - classification + shadow bands appended to the output
 
 ## Research Paper
@@ -74,7 +74,7 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `osm_features.py` — queries OSM for bike lanes/streets, classifies each feature, caches to GeoPackage
 - `mask.py` — buffers + dissolves geometry per category, rasterizes onto a tile's grid
 - `shadows.py` — detects shadow via a blue-excess index, cleans up the mask, brightens shadowed pixels using a local sunlit reference per band
-- `filter_imagery.py` — ties it together: masks, corrects shadows, appends classification + shadow bands, writes the GeoTIFF
+- `filter_imagery.py` — ties it together: masks, handles shadows per `SHADOW_HANDLING` (correct or cut), appends classification + shadow bands, writes the GeoTIFF
 - `inspect.py` — CLI to get a tile's dimensions and band info
 - `detection/base.py` — the model swap point: `Detector` protocol, `Detection` type. Nothing else in the detection code depends on a specific model.
 - `detection/dataset.py` — converts CVAT YOLO-seg exports (drawn on the full 5000x5000 tiles) into a chipped, trainable YOLO dataset
@@ -83,13 +83,25 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `detection/width.py` — skeletonize + distance transform → width stats, model-agnostic (works on any mask)
 - `detection/rasterize.py` — burns a numeric field (score, width_mean_m, ...) from the detections into a GeoTIFF aligned to the source tile grid, plus a colorized PNG preview (raw single-band GeoTIFFs render as flat grayscale in a plain image viewer without one)
 
-## Shadow correction
+## Shadow handling
+
+`SHADOW_HANDLING` in `config.py` picks one of two strategies for shadowed pixels within the road/bike-lane buffer:
+
+- `"correct"` (default) — brightness-normalize them to match nearby sunlit pixels, described below.
+- `"cut"` — drop them entirely: zeroed to `NODATA_VALUE` and reclassified as background, exactly like pixels outside the buffer. For imagery where correction still distorts too much of the tile to be usable, this trades shadowed coverage away entirely rather than keeping a degraded version of it. Also cuts a further `SHADOW_CUT_MARGIN_M` (1 m default) beyond the detected shadow mask, since a real shadow's edge is a soft penumbra that the mask's hard Otsu threshold cuts straight through — cutting only exactly at the mask would still retain a ring of partially-shadowed pixels just outside it, leaving a hard edge anyway.
+
+Either way, the shadow band (see Output format) records which pixels were shadowed, even under `"cut"` where those pixels end up as background/nodata in every other band; it reflects detection only, not the cut margin.
+
+### Correction (`"correct"`)
 
 - **detect** — blue-excess index `(B-R)/(B+R)`: shadows are lit by scattered blue skylight rather than direct sun, so they read measurably bluer than sunlit pavement. Threshold picked automatically per tile via [Otsu's method](https://en.wikipedia.org/wiki/Otsu%27s_method).
 - **clean up** — morphological closing (disk-shaped structuring element, so the boundary comes out rounded rather than square-cornered) fills small gaps, then blobs under 1.5 m² get dropped. Real cast shadows are big coherent patches, not scattered specks (lane markings, oil stains trip the same index).
 - **correct** — each shadow pixel is brightened by an additive, per-band offset. Deep inside a shadow the offset is the gap between the mean of nearby (15 m radius) sunlit pixels and the local shadow mean; near the shadow mask's own boundary (within 2 m) it instead blends towards matching the *exact value of the nearest sunlit pixel*, so the corrected value meets its real neighbor almost exactly at the crossing rather than a regional average. Done per band rather than one shared offset, since shadow shifts color, not just brightness.
+- **bleed** — the correction also fades a short distance (`BLEED_RADIUS_M`, 1 m default) past the mask into nominally-sunlit pixels, rather than stopping dead exactly at it: each pixel in that margin gets a fraction of its nearest shadow pixel's own offset, scaled down by distance to zero at the margin's outer edge. The mask's Otsu threshold draws a hard line through what's optically a soft penumbra, so pixels just outside it can still read slightly off from genuinely untouched pavement — even with the boundary-matching above, that shows up as a visible edge over a short stretch rather than a one-pixel discontinuity.
 
 Tried and dropped: Tsai's NSVDI (a saturation/value shadow index from the remote-sensing literature) — its saturation term turned out to track pavement texture noise more than actual shadow in this imagery. Also tried two ways of smoothing a plain windowed-average correction instead of boundary-matching it: Gaussian-blurring the gain field across the boundary in both directions (spread real brightening into never-shadowed pixels — a wider blur just made the resulting glow bigger, not smaller), and tapering gain to 1x purely inside the shadow (left a dark under-corrected rim at the edge instead). Both missed the actual problem: a windowed average is a *regional* estimate, so even "fully corrected" pixels don't match whatever specific neighbor they're touching — no amount of smoothing the transition fixes a gap between two regions.
+
+Also found and fixed two bugs, both specific to shadows wider than the 15 m reference window (e.g. a building's cast shadow spanning a whole street): pixels with too little sunlit reference nearby used to be left completely uncorrected instead of falling back to the nearest-sunlit-pixel target, keeping their real unmodified edge — a hard dark border wherever a large shadow met corrected pavement; and the "nearest sunlit pixel" lookup was finding the nearest *non-shadow* pixel rather than the nearest *sunlit* one, which for a shadow near the buffer's own edge could resolve to background/nodata just outside the buffer, silently corrupting correction for any pixel that picked it as a reference.
 
 ### Correction steps
 
@@ -97,11 +109,11 @@ Tried and dropped: Tsai's NSVDI (a saturation/value shadow index from the remote
 - road pixels split into "shadow" and "sunlit" using the cleaned mask
 - per band, independently:
   - local mean of sunlit pixels in a sliding window, local mean of shadow pixels in the same window
-  - nearest sunlit pixel's exact value, via a Euclidean distance transform from the shadow mask
-  - target = nearest-neighbor value near the mask boundary, blending to the windowed sunlit mean over the innermost `FEATHER_RADIUS_M` (2 m) of the shadow region
+  - nearest *sunlit* pixel's exact value, via a Euclidean distance transform from the sunlit mask (not just "not shadow" — see bugs above)
+  - target = nearest-neighbor value near the mask boundary, blending to the windowed sunlit mean over the innermost `FEATHER_RADIUS_M` (2 m) of the shadow region — but only where that windowed mean has enough real sunlit pixels nearby to be trustworthy; otherwise the nearest-neighbor value is used regardless of depth, so every shadow pixel gets corrected however far it sits from a sunlit reference
   - offset = target − local shadow mean, clamped to [0, shadow mean × 2] (equivalent to the old 3x gain cap)
-  - pixels with too little sunlit reference nearby (<2% of the window) are left uncorrected rather than guessed
   - pixel value + its offset
+  - nearest *shadow* pixel's own offset, via a Euclidean distance transform from the shadow mask, scaled by `1 − distance/BLEED_RADIUS_M` (clamped to 0–1) and added to sunlit pixels within `BLEED_RADIUS_M` of the mask
 - result clipped back to 0–255 and cast back to the original dtype
 
 ## Output format
@@ -120,6 +132,8 @@ Tried and dropped: Tsai's NSVDI (a saturation/value shadow index from the remote
 Two phases, two scripts. Both operate on the prefiltered `data/output/*.tif` tiles (RGB bands only) — matches what the CVAT annotations were drawn on.
 
 **We tried zero-shot first (OWLv2, then YOLO-World) and dropped it.** Neither has ever seen top-down aerial orthophoto imagery, only ground-level natural photos, and it showed on real test chips: text prompts scored ~0.02–0.09 confidence (noise); image-exemplar/large-checkpoint attempts scored confidently but matched whole chips or unrelated features (rooftops, tree canopy), not lanes. A domain gap zero-shot prompting doesn't bridge. See git history if you want the details — this README now only covers the current approach.
+
+**Also tried a classical (non-ML) color+shape detector and dropped it.** Otsu-adaptive red/white color splits plus shape filtering (elongated, constant-width) found real lane paint in isolation, but at full-tile scale it couldn't reliably separate lane paint from other similarly-colored surfaces in this imagery -- terracotta rooftops (near-identical redness/hue to the paint) and bare dirt/leaf-litter ground under winter trees both cleared the same color thresholds. Shape and border filtering cut down but didn't eliminate either confound. See git history if you want the details.
 
 ### Training
 

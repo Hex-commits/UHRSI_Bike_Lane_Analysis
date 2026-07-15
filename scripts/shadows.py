@@ -51,6 +51,19 @@ matching gets noisy and unrepresentative far from the boundary. The
 correction itself is additive (add an offset) rather than multiplicative
 (scale by a gain), so a shadow pixel's own texture/noise relative to its
 local shadow mean is preserved rather than amplified.
+
+Two further bugs, both only visible on large shadows (wider than
+`local_radius_m`, e.g. a building's cast shadow spanning a whole street):
+first, pixels whose windowed sunlit density fell below
+`MIN_REFERENCE_DENSITY` were left completely uncorrected rather than falling
+back to the nearest-sunlit-pixel target, so a shadow wider than the
+reference window kept its real, unmodified, sharp edge wherever the window
+couldn't reach a sunlit pixel -- a hard dark border where it met corrected
+pavement. Second, the "nearest sunlit pixel" distance transform was computed
+against *not-shadow* rather than *sunlit*, so for a shadow sitting near the
+buffer's own edge, the "nearest" reference pixel could actually be
+background/nodata just outside the buffer -- corrupting the correction for
+every pixel that picked it, independent of shadow size.
 """
 
 import numpy as np
@@ -75,6 +88,15 @@ MIN_SHADOW_AREA_M2 = 1.5
 # target blends from "exact value of the nearest sunlit pixel" (right at the
 # edge) to "windowed local average" (interior).
 FEATHER_RADIUS_M = 2.0
+
+# Distance *outward* past the shadow mask's boundary that also gets a
+# (fading) correction, rather than stopping abruptly exactly at the mask.
+# Real shadow edges are a soft penumbra; the mask's Otsu threshold draws a
+# hard line through that gradient, so pixels just outside it can still read
+# slightly different from genuinely untouched sunlit pavement -- bleeding
+# the correction a short, bounded distance past the mask (fading to zero,
+# not a flat extension) softens that instead of stopping dead at the edge.
+BLEED_RADIUS_M = 1.0
 
 
 def _otsu_threshold(values: np.ndarray, bins: int = 256) -> float:
@@ -150,20 +172,52 @@ def correct_shadows(
     """Brighten shadowed pixels using a local sunlit-pixel reference, per band.
 
     `data` is a (bands, H, W) array; every band is corrected independently
-    using only pixels within `road_mask`, restricted to a `local_radius_m`
-    neighborhood around each pixel for the windowed-average part of the
-    target. Near the shadow mask's own boundary (within `FEATHER_RADIUS_M`),
-    the target blends towards the exact value of the nearest sunlit pixel
-    instead, so the correction meets its real neighbor almost exactly at the
-    crossing (see module docstring). Pixels outside `road_mask`, or shadow
-    pixels with too little nearby sunlit reference, are left unchanged.
+    using only pixels within `road_mask`. Near the shadow mask's own
+    boundary (within `FEATHER_RADIUS_M`), the target blends towards the
+    exact value of the nearest sunlit pixel, so the correction meets its
+    real neighbor almost exactly at the crossing; deeper inside, it blends
+    towards a `local_radius_m`-windowed average instead, since matching a
+    single nearest pixel gets noisy and unrepresentative far from the
+    boundary (see module docstring).
+
+    Every shadow pixel gets corrected, however far it sits from a sunlit
+    reference: where the windowed average doesn't have enough real sunlit
+    pixels nearby to be trustworthy (`MIN_REFERENCE_DENSITY`) -- shadows
+    wider than `local_radius_m` -- the target falls back to the nearest
+    sunlit pixel's value regardless of depth, rather than leaving those
+    pixels uncorrected. An earlier version left them uncorrected outright,
+    which was fine for isolated small shadows but meant a large shadow (a
+    building's cast shadow spanning a whole street, say) kept its real,
+    unmodified, sharp edge wherever it was too wide for the window --
+    visible as a hard dark border where the shadow met corrected pavement.
+
+    The correction also bleeds a short distance (`BLEED_RADIUS_M`) past the
+    mask into nominally-sunlit pixels, fading to zero: each bleed pixel gets
+    a fraction of its nearest shadow pixel's own offset, scaled down by
+    distance. Otherwise the correction stops dead exactly at the mask's hard
+    Otsu-thresholded edge, which cuts through what's optically a soft
+    penumbra -- pixels just outside the mask can still read slightly off
+    from genuinely untouched pavement, showing up as a visible boundary even
+    though nothing here is technically discontinuous at the crossing pixel.
     """
     window = 2 * max(1, round(local_radius_m / pixel_size_m)) + 1
     feather_radius_px = FEATHER_RADIUS_M / pixel_size_m
+    bleed_radius_px = BLEED_RADIUS_M / pixel_size_m
     sunlit_mask = road_mask & ~shadow_mask
 
-    dist_to_boundary, nearest_idx = distance_transform_edt(shadow_mask, return_indices=True)
+    # Distance/index to the nearest genuinely *sunlit* pixel -- not just the
+    # nearest non-shadow pixel, which can be background/nodata just outside
+    # the buffer (e.g. a shadow sitting right at the buffer's edge), giving
+    # a bogus near-zero "nearest neighbor" and silently killing correction
+    # for every pixel that picks it as a reference.
+    dist_to_boundary, nearest_idx = distance_transform_edt(~sunlit_mask, return_indices=True)
     taper = np.clip(dist_to_boundary / feather_radius_px, 0.0, 1.0)
+
+    # Distance/index to the nearest shadow pixel, for bleeding a fading
+    # correction a short distance past the mask (see BLEED_RADIUS_M).
+    dist_from_shadow, nearest_shadow_idx = distance_transform_edt(~shadow_mask, return_indices=True)
+    outward_taper = np.clip(1.0 - dist_from_shadow / bleed_radius_px, 0.0, 1.0)
+    bleed_mask = road_mask & ~shadow_mask & (dist_from_shadow <= bleed_radius_px)
 
     corrected = data.astype(np.float32)
     for band in range(data.shape[0]):
@@ -173,12 +227,21 @@ def correct_shadows(
         shadow_mean, _ = _local_masked_mean(band_data, shadow_mask, window)
         nearest_sunlit_value = band_data[tuple(nearest_idx)]
 
-        has_reference = shadow_mask & (sunlit_density >= MIN_REFERENCE_DENSITY) & (shadow_mean > 1)
-        target = nearest_sunlit_value * (1.0 - taper) + sunlit_mean * taper
-        max_offset = np.maximum(shadow_mean, 0.0) * (MAX_GAIN - 1.0)
-        offset = np.clip(target - shadow_mean, 0.0, max_offset)
+        trusted_average = sunlit_density >= MIN_REFERENCE_DENSITY
+        blended_target = nearest_sunlit_value * (1.0 - taper) + sunlit_mean * taper
+        target = np.where(trusted_average, blended_target, nearest_sunlit_value)
 
-        band_data[has_reference] += offset[has_reference]
+        baseline = np.maximum(shadow_mean, 1.0)
+        max_offset = baseline * (MAX_GAIN - 1.0)
+        offset = np.clip(target - baseline, 0.0, max_offset)
+
+        band_data[shadow_mask] += offset[shadow_mask]
+
+        # Bleed a fraction of the nearest shadow pixel's own offset into the
+        # sunlit-side margin, fading to zero by BLEED_RADIUS_M, so the
+        # correction doesn't stop dead exactly at the (imprecise) mask edge.
+        nearest_shadow_offset = offset[tuple(nearest_shadow_idx)]
+        band_data[bleed_mask] += (nearest_shadow_offset * outward_taper)[bleed_mask]
 
     info = np.iinfo(data.dtype)
     return np.clip(corrected, info.min, info.max).astype(data.dtype)
