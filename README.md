@@ -1,126 +1,101 @@
 # UHRSI Bike Lane Analysis
 
-Prefilters high-resolution aerial orthophoto tiles of Münster, Germany down
-to just the bike lane / street network, for use as an ML training set. Bike
-lane and street geometry comes from OpenStreetMap; the imagery is masked to
-a buffered area around that geometry, shadows within the mask are
-brightness-normalized, and a classification band records whether each
-retained pixel is a bike lane or a general street.
+Filters Münster aerial imagery down to the bike lane / street network, for ML training data prep.
+
+- bike lane + street geometry from OpenStreetMap
+- imagery masked to a buffer around that geometry
+- shadows detected and brightness-corrected
+- classification + shadow bands appended to the output
 
 ## Setup
 
-Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.14 (pinned in
-`.python-version`; `uv` will install it automatically if needed).
+Needs `uv` and Python 3.14 (pinned in `.python-version`, uv installs it automatically).
 
 ```bash
-# Install dependencies into a local .venv
 uv sync
 ```
 
 ### Input data
 
-The source imagery is too large for this repo. Download the IDOP20 RGBI
-tiles for the area of interest from the [NRW
-Geoportal](https://www.geoportal.nrw) and place the `.jp2` files under:
+Imagery is too large for the repo. Download IDOP20 RGBI tiles from the [NRW
+Geoportal](https://www.geoportal.nrw), drop the `.jp2` files in:
 
 ```
 data/input/idop_kacheln/
 ```
 
-## Running the pipeline
+## Running
 
 ```bash
 uv run python main.py
 ```
 
-This loads the input tiles, fetches/caches the OSM bike lane and street
-geometry, masks and shadow-corrects each tile, and writes one output
-GeoTIFF per input tile to `data/output/`.
+- loads tiles, fetches/caches OSM geometry, masks + corrects each tile, writes one GeoTIFF per input tile to `data/output/`
+- safe to re-run: OSM results are cached (`data/osm/osm_features.gpkg`), so it skips the Overpass query unless you delete the cache or pass `force_refresh=True`
 
-Re-running is safe and idempotent: OSM results are cached to
-`data/osm/osm_features.gpkg`, so subsequent runs skip the (slow,
-rate-limited) Overpass query unless that cache is deleted or
-`force_refresh=True` is passed to `fetch_osm_features`.
-
-### Inspecting output tiles
+### Inspecting output
 
 ```bash
-# Inspect every tile in data/output/
-uv run python -m scripts.inspect
-
-# Inspect specific files
-uv run python -m scripts.inspect data/output/idop20rgbi_32_405_5758_1_nw_2025_bikelanes.tif
+uv run python -m scripts.inspect                     # all tiles in data/output/
+uv run python -m scripts.inspect data/output/foo.tif  # specific file
 ```
 
-Prints each tile's CRS, dimensions/resolution, and a per-band breakdown
-(dtype, color interpretation, nodata, description).
+Prints CRS, dimensions, and per-band metadata.
 
-## Project layout
+## Layout
 
 ```
-main.py           # thin orchestrator: calls into scripts/ in sequence
-scripts/           # all pipeline logic lives here as importable modules
+main.py     # orchestrator, calls into scripts/
+scripts/    # pipeline logic, one module per step
 data/
-  input/           # raw IDOP20 .jp2 tiles (not tracked in git)
-  osm/             # cached OSM query results (not tracked in git)
-  output/          # filtered/corrected output GeoTIFFs (not tracked in git)
+  input/    # raw .jp2 tiles (not in git)
+  osm/      # cached OSM query results (not in git)
+  output/   # final GeoTIFFs (not in git)
 ```
 
 ## Scripts
 
-- **`scripts/config.py`** — central configuration: paths, CRS (EPSG:25832),
-  which OSM tags count as a bike lane vs. a street, buffer distances,
-  classification band labels, and the shadow-correction toggle.
+- `config.py` — paths, CRS, OSM tag rules, buffer sizes, band labels, toggles
+- `tiles.py` — finds input tiles, computes their combined bounding box
+- `osm_features.py` — queries OSM for bike lanes/streets, classifies each feature, caches to GeoPackage
+- `mask.py` — buffers + dissolves geometry per category, rasterizes onto a tile's grid
+- `shadows.py` — detects shadow via a blue-excess index, cleans up the mask, brightens shadowed pixels using a local sunlit reference per band
+- `filter_imagery.py` — ties it together: masks, corrects shadows, appends classification + shadow bands, writes the GeoTIFF
+- `inspect.py` — CLI to get a tile's dimensions and band info
 
-- **`scripts/tiles.py`** — discovers input `.jp2` tile paths and computes
-  their combined bounding box, used to scope the OSM query to the actual
-  area covered by the imagery.
+## Shadow correction
 
-- **`scripts/osm_features.py`** — queries OpenStreetMap (via `osmnx`) for
-  bike lane and street geometry within the tiles' bounding box, classifies
-  each feature as `"bikelane"` (dedicated cycleways, or roads with a mapped
-  cycle lane/track) or `"street"` (general road classes bikes may legally
-  use in mixed traffic), and caches the result to a GeoPackage.
+- **detect** — blue-excess index `(B-R)/(B+R)`: shadows are lit by scattered blue skylight rather than direct sun, so they read measurably bluer than sunlit pavement. Threshold picked automatically per tile via [Otsu's method](https://en.wikipedia.org/wiki/Otsu%27s_method).
+- **clean up** — morphological closing fills small gaps, then blobs under 1.5 m² get dropped. Real cast shadows are big coherent patches, not scattered specks (lane markings, oil stains trip the same index).
+- **correct** — each shadow pixel is brightened using the mean of nearby (15 m radius) sunlit pixels in the same band, capped at 3x gain. Done per band rather than one shared gain, since shadow shifts color, not just brightness.
 
-- **`scripts/mask.py`** — buffers each category's geometry by its
-  configured distance and dissolves it into a single polygon per category;
-  rasterizes a polygon onto a tile's pixel grid to produce a boolean mask.
+Tried and dropped: Tsai's NSVDI (a saturation/value shadow index from the remote-sensing literature) — its saturation term turned out to track pavement texture noise more than actual shadow in this imagery.
 
-- **`scripts/shadows.py`** — detects shadowed pixels within the road mask
-  using an HSV-based shadow index (Tsai's NSVDI), then brightens them using
-  a locally-windowed sunlit-pixel reference (not a single tile-wide
-  average), so the correction doesn't mix statistics across unrelated
-  materials elsewhere in the tile.
+### Correction steps
 
-- **`scripts/filter_imagery.py`** — combines the above: rasterizes both
-  category masks for a tile, applies shadow correction, zeroes out every
-  pixel outside the combined mask, appends a classification band
-  (`0`=background, `1`=bikelane, `2`=street), and writes the result as a
-  lossless GeoTIFF.
-
-- **`scripts/inspect.py`** — standalone diagnostic CLI; prints an output
-  tile's dimensions and per-band metadata to the terminal.
+- window size comes from `local_radius_m` (15 m default), converted to pixels using the tile's resolution
+- road pixels split into "shadow" and "sunlit" using the cleaned mask
+- per band, independently:
+  - local mean of sunlit pixels in a sliding window
+  - local mean of shadow pixels in the same window
+  - gain = sunlit mean / shadow mean, clamped to 1x–3x
+  - pixels with too little sunlit reference nearby (<2% of the window) are left uncorrected rather than guessed
+  - shadow pixel value × its gain
+- result clipped back to 0–255 and cast back to the original dtype
 
 ## Output format
 
-Each output GeoTIFF has 5 bands: the original Red/Green/Blue/Infrared bands
-from the source tile (pixels outside the mask zeroed out), plus a 5th
-classification band (`0`=background, `1`=bikelane, `2`=street).
+6 bands per GeoTIFF:
+
+1. R
+2. G
+3. B
+4. Infrared (source pixels, masked to 0 outside the buffer)
+5. classification — `0` background, `1` bikelane, `2` street
+6. shadow — `0` not shadowed, `1` shadowed
 
 ## Known limitations
 
-- **OSM coverage gaps**: bike lane mapping in OSM is sometimes incomplete —
-  a lane can just stop because it isn't mapped, not because it physically
-  ends. Including general streets (not just dedicated bike lanes) in the
-  mask mitigates this, since bikes are legally allowed to use most streets
-  in mixed traffic, and the classification band still records which is
-  which.
-- **Street buffer bleeds onto adjacent buildings**: in dense blocks with
-  narrow streets, the buffered street polygon can overlap adjacent building
-  rooftops, since OSM road centerlines sometimes run close to building
-  footprints. Not yet fixed — a likely fix is subtracting OSM building
-  footprints from the buffer before rasterizing.
-- **Shadow correction is a statistical approximation**, not physical
-  de-shadowing: it normalizes brightness using nearby sunlit pixels, but
-  can't recover detail lost in very deep, low-contrast shadow interiors,
-  and has no sun-angle/DSM data to model illumination directly.
+- **OSM gaps** — bike lane mapping stops abruptly where OSM data is incomplete, not where the lane physically ends. Including streets alongside dedicated lanes covers most of this.
+- **Buffer bleeds onto buildings** — in dense blocks, narrow streets mean the buffer overlaps adjacent rooftops. Not fixed yet; likely fix is subtracting OSM building footprints from the buffer.
+- **Shadow correction is statistical, not physical** — brightens using nearby sunlit pixels, doesn't reconstruct real detail in deep shadow, no sun-angle/DSM data involved. Mainly, because we don't have the data for it.
