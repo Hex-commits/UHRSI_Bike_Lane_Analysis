@@ -65,3 +65,11 @@ STREET_LABEL = 2
 # Value written to pixels outside the buffered mask (also doubles as the
 # background label in the classification band).
 NODATA_VALUE = BACKGROUND_LABEL
+
+# Whether to detect and brightness-normalize shadowed pixels within the
+# road/bike-lane mask before writing output tiles.
+APPLY_SHADOW_CORRECTION = True
+
+# Integer labels written to the shadow band.
+NOT_SHADOW_LABEL = 0
+SHADOW_LABEL = 1
