@@ -73,3 +73,37 @@ APPLY_SHADOW_CORRECTION = True
 # Integer labels written to the shadow band.
 NOT_SHADOW_LABEL = 0
 SHADOW_LABEL = 1
+
+# --- Detection: trained YOLO-seg model (see scripts/detection/) ---
+
+# Runs on the prefiltered data/output/ tiles (bands 1-3 = RGB), not the raw
+# input tiles -- matches what the CVAT annotations were drawn on.
+DETECTION_INPUT_DIR = OUTPUT_DIR
+
+# CVAT export(s) in "Ultralytics YOLO segmentation 1.0" format: each
+# subdirectory is one export task, containing data.yaml + labels/train/*.txt.
+ANNOTATIONS_DIR = PROJECT_ROOT / "data" / "input" / "annotated_bike_lanes"
+
+TRAINING_DIR = PROJECT_ROOT / "data" / "training"
+# 640px matches ultralytics' default imgsz, so training chips aren't
+# rescaled/shrunk further -- bike lanes are only ~10px wide at 0.2m/px, so
+# extra downscaling would make them very hard to learn.
+TRAINING_CHIP_SIZE_PX = 640
+TRAINING_CHIP_OVERLAP_PX = 64
+TRAINING_VAL_FRACTION = 0.2
+
+YOLO_SEG_BASE_CHECKPOINT = "yolo11n-seg.pt"
+YOLO_SEG_TRAINED_WEIGHTS_PATH = PROJECT_ROOT / "runs" / "segment" / "train" / "weights" / "best.pt"
+
+# Matches TRAINING_CHIP_SIZE_PX: YOLO models perform best near their
+# trained imgsz, so inference chips use the same size the model was
+# fine-tuned on rather than an independently-chosen value.
+DETECTION_CHIP_SIZE_PX = TRAINING_CHIP_SIZE_PX
+DETECTION_CHIP_OVERLAP_PX = TRAINING_CHIP_OVERLAP_PX
+DETECTION_CONFIDENCE_THRESHOLD = 0.25
+
+DETECTION_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelanes.gpkg"
+
+# Fields burned into a GeoTIFF each (data/detections/bikelanes_<field>.tif),
+# for visual inspection without GIS software / overlay against data/output/.
+DETECTION_RASTER_FIELDS = ["score", "width_mean_m"]

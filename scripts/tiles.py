@@ -7,9 +7,9 @@ import rasterio
 from scripts.config import INPUT_TILES_DIR
 
 
-def find_tile_paths(tiles_dir: Path = INPUT_TILES_DIR) -> list[Path]:
-    """Return all imagery tile paths in `tiles_dir`, sorted for reproducibility."""
-    return sorted(tiles_dir.glob("*.jp2"))
+def find_tile_paths(tiles_dir: Path = INPUT_TILES_DIR, pattern: str = "*.jp2") -> list[Path]:
+    """Return all imagery tile paths in `tiles_dir` matching `pattern`, sorted for reproducibility."""
+    return sorted(tiles_dir.glob(pattern))
 
 
 def tile_bounds(tile_path: Path) -> tuple[float, float, float, float]:

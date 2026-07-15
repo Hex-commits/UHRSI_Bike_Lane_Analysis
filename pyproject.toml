@@ -6,10 +6,14 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "geopandas>=1.1.4",
+    "matplotlib>=3.11.0",
     "numpy>=2.5.1",
     "osmnx>=2.1.0",
     "pyproj>=3.7.2",
+    "pyyaml>=6.0.3",
     "rasterio>=1.5.0",
+    "scikit-image>=0.26.0",
     "scipy>=1.18.0",
     "shapely>=2.1.2",
+    "ultralytics>=8.4.96",
 ]

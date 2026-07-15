@@ -12,22 +12,50 @@ blue-excess ~0.00), blue-excess cleanly separates the two.
 
 Raw per-pixel detection is still noisy (lane markings, oil stains, and
 compression artifacts can trip the same index), so the mask is cleaned up
-morphologically before use: small gaps get filled and isolated specks below
-a minimum area are dropped, since real cast shadows are spatially coherent
-blobs, not scattered single pixels.
+morphologically before use: small gaps get filled (using a disk-shaped
+structuring element, so the boundary comes out rounded rather than a
+square-cornered staircase) and isolated specks below a minimum area are
+dropped, since real cast shadows are spatially coherent blobs, not scattered
+single pixels.
 
-Correction brightens each shadowed pixel using a per-band gain derived from
-*nearby* sunlit pixels only (a local window), not a single tile-wide
+Correction brightens each shadowed pixel using a per-band offset derived
+from *nearby* sunlit pixels only (a local window), not a single tile-wide
 average — the road/bike-lane mask covers a mix of materials, so a single
 global correction would rescale using statistics from unrelated materials
 elsewhere in the tile. Each band is corrected independently (rather than
-sharing one gain) because shadow isn't just dimmer, it's bluer: neutralizing
-that color shift requires bringing the R/G/B channels back into balance,
-not just scaling all three up by the same factor.
+sharing one offset) because shadow isn't just dimmer, it's bluer:
+neutralizing that color shift requires bringing the R/G/B channels back
+into balance, not just brightening all three by the same amount.
+
+A plain "match the local windowed average" correction (two earlier versions
+of this module did exactly that, with the transition smoothed various ways)
+turned out to systematically undercorrect: a window wide enough to be a
+stable brightness estimate (15 m) averages over enough real variation that
+its mean sits well below whatever specific pixel a shadow happens to be
+touching at any given point, so even a "fully corrected" shadow interior
+stayed visibly darker than its actual neighbor -- no amount of smoothing the
+*transition* fixes a gap between two *regions*. Two smoothing attempts
+confirmed this from opposite directions: Gaussian-blurring the gain field
+across the boundary just spread that same regional gap into real sunlit
+pixels (a bigger blur made the visible glow bigger, not smaller), and
+tapering the gain to 1x purely inside the shadow left a dark under-corrected
+rim right at the edge instead.
+
+The fix used here is boundary-matched blending: near the shadow mask's own
+edge, the correction target is the *actual value of the nearest sunlit
+pixel* (via a Euclidean distance transform), not a windowed average, so the
+corrected value is forced to meet its real neighbor almost exactly at the
+crossing. Deeper inside the shadow (past `FEATHER_RADIUS_M`), the target
+blends over to the windowed average instead, since nearest-single-pixel
+matching gets noisy and unrepresentative far from the boundary. The
+correction itself is additive (add an offset) rather than multiplicative
+(scale by a gain), so a shadow pixel's own texture/noise relative to its
+local shadow mean is preserved rather than amplified.
 """
 
 import numpy as np
-from scipy.ndimage import binary_closing, label, uniform_filter
+from scipy.ndimage import binary_closing, distance_transform_edt, label, uniform_filter
+from skimage.morphology import disk
 
 # How brightening is capped: a shadow pixel is never boosted more than this
 # multiple of its original value, to avoid blowing out shadows that have
@@ -42,6 +70,11 @@ MIN_REFERENCE_DENSITY = 0.02
 # filled, and isolated shadow regions smaller than this area get dropped.
 CLOSING_RADIUS_M = 0.6
 MIN_SHADOW_AREA_M2 = 1.5
+
+# Distance in from the shadow mask's own boundary over which the correction
+# target blends from "exact value of the nearest sunlit pixel" (right at the
+# edge) to "windowed local average" (interior).
+FEATHER_RADIUS_M = 2.0
 
 
 def _otsu_threshold(values: np.ndarray, bins: int = 256) -> float:
@@ -85,8 +118,7 @@ def detect_shadow_mask(rgb: np.ndarray, road_mask: np.ndarray) -> np.ndarray:
 def clean_shadow_mask(shadow_mask: np.ndarray, pixel_size_m: float) -> np.ndarray:
     """Fill small gaps and drop small isolated regions from a raw shadow mask."""
     closing_radius_px = max(1, round(CLOSING_RADIUS_M / pixel_size_m))
-    structure = np.ones((2 * closing_radius_px + 1, 2 * closing_radius_px + 1), dtype=bool)
-    closed = binary_closing(shadow_mask, structure=structure)
+    closed = binary_closing(shadow_mask, structure=disk(closing_radius_px))
 
     labeled, num_labels = label(closed)
     if num_labels == 0:
@@ -119,11 +151,19 @@ def correct_shadows(
 
     `data` is a (bands, H, W) array; every band is corrected independently
     using only pixels within `road_mask`, restricted to a `local_radius_m`
-    neighborhood around each pixel. Pixels outside `road_mask`, or shadow
-    pixels with too little nearby sunlit reference, are returned unchanged.
+    neighborhood around each pixel for the windowed-average part of the
+    target. Near the shadow mask's own boundary (within `FEATHER_RADIUS_M`),
+    the target blends towards the exact value of the nearest sunlit pixel
+    instead, so the correction meets its real neighbor almost exactly at the
+    crossing (see module docstring). Pixels outside `road_mask`, or shadow
+    pixels with too little nearby sunlit reference, are left unchanged.
     """
     window = 2 * max(1, round(local_radius_m / pixel_size_m)) + 1
+    feather_radius_px = FEATHER_RADIUS_M / pixel_size_m
     sunlit_mask = road_mask & ~shadow_mask
+
+    dist_to_boundary, nearest_idx = distance_transform_edt(shadow_mask, return_indices=True)
+    taper = np.clip(dist_to_boundary / feather_radius_px, 0.0, 1.0)
 
     corrected = data.astype(np.float32)
     for band in range(data.shape[0]):
@@ -131,13 +171,14 @@ def correct_shadows(
 
         sunlit_mean, sunlit_density = _local_masked_mean(band_data, sunlit_mask, window)
         shadow_mean, _ = _local_masked_mean(band_data, shadow_mask, window)
+        nearest_sunlit_value = band_data[tuple(nearest_idx)]
 
         has_reference = shadow_mask & (sunlit_density >= MIN_REFERENCE_DENSITY) & (shadow_mean > 1)
-        gain = np.ones_like(band_data)
-        gain[has_reference] = sunlit_mean[has_reference] / shadow_mean[has_reference]
-        gain = np.clip(gain, 1.0, MAX_GAIN)
+        target = nearest_sunlit_value * (1.0 - taper) + sunlit_mean * taper
+        max_offset = np.maximum(shadow_mean, 0.0) * (MAX_GAIN - 1.0)
+        offset = np.clip(target - shadow_mean, 0.0, max_offset)
 
-        band_data[has_reference] = band_data[has_reference] * gain[has_reference]
+        band_data[has_reference] += offset[has_reference]
 
     info = np.iinfo(data.dtype)
     return np.clip(corrected, info.min, info.max).astype(data.dtype)
