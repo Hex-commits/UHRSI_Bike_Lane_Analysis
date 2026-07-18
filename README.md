@@ -61,6 +61,7 @@ data/
   input/
     idop_kacheln/          # raw .jp2 tiles (not in git)
     annotated_bike_lanes/  # CVAT-exported YOLO-seg annotations (in git -- small, hand-labeled)
+    textures/              # texture-embedding reference crops, one subfolder per label (in git -- small)
   osm/            # cached OSM query results (not in git)
   output/         # final GeoTIFFs (not in git)
   training/       # chipped YOLO dataset, generated from annotated_bike_lanes/ (not in git)
@@ -78,9 +79,12 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `redness.py` — boosts saturation of reddish (bike-lane paint) pixels within the road/bike-lane mask
 - `filter_imagery.py` — ties it together: masks, handles shadows per `SHADOW_HANDLING` (correct, cut, or none), boosts red pixels if `APPLY_RED_BOOST`, appends classification + shadow bands, writes the GeoTIFF
 - `inspect.py` — CLI to get a tile's dimensions and band info
+- `texture_embedding.py` — frozen pretrained-CNN feature extractor + discriminant-score classification (see Texture-embedding detector below)
+- `texture_analysis.py` — CLI diagnostics for the above: reference-set similarity report, and scan-a-region visualization
 - `detection/base.py` — the model swap point: `Detector` protocol, `Detection` type. Nothing else in the detection code depends on a specific model.
 - `detection/dataset.py` — converts CVAT YOLO-seg exports (drawn on the full 5000x5000 tiles) into a chipped, trainable YOLO dataset
 - `detection/yolo_seg_detector.py` — current adapter: loads a fine-tuned YOLO-seg checkpoint, runs inference on a chip
+- `detection/texture_detector.py` — `Detector` adapter for texture_embedding.py: sliding-window scan + discriminant scoring
 - `detection/tiling.py` — chips a tile into windows for inference, maps masks back to tile pixel/geo coordinates
 - `detection/width.py` — skeletonize + distance transform → width stats, model-agnostic (works on any mask)
 - `detection/rasterize.py` — burns a numeric field (score, width_mean_m, ...) from the detections into a GeoTIFF aligned to the source tile grid, plus a colorized PNG preview (raw single-band GeoTIFFs render as flat grayscale in a plain image viewer without one)
@@ -173,6 +177,31 @@ One API gotcha worth knowing if you touch `yolo_seg_detector.py`: `results.masks
 The training data is 6 hand-labeled "Red Bike Lane" instances in a single annotated tile — chipping only yields 2 training images / 1 validation image. That's nowhere near enough to learn anything general; running the fine-tuned model across all 6 tiles at conf≥0.25 produces exactly 4 detections, and checking each one against the source imagery: one lands on plausible pavement, one lands entirely on masked-out background (no imagery at all), one on a plain gray parking lot with no visible red marking, one on a rooftop. Widths reported (1.8–2.8m) are physically plausible, which is a good sign the geometry pipeline itself is sound, but the detections it's measuring aren't trustworthy yet.
 
 This is a data-quantity problem, not a pipeline bug: unlike the zero-shot attempts (wrong architecture/domain for the task), this is the right approach, just needs more annotated tiles before the results mean anything. Annotate more tiles in CVAT, export in the same format into a new subdirectory under `data/input/annotated_bike_lanes/`, and re-run `train.py` — the dataset export already aggregates across every export subdirectory found there.
+
+## Texture-embedding detector
+
+A third approach, alongside YOLO and the dropped classical color+shape detector: a frozen, pretrained-on-aerial-imagery CNN used purely for embedding similarity, no training at all. See `scripts/texture_embedding.py`, `scripts/detection/texture_detector.py`, `scripts/texture_analysis.py`.
+
+- **backbone** — TorchGeo's Swin V2-B, `NAIP_RGB_SI_SATLAS` weights (SatlasPretrain, pretrained on NAIP aerial RGB imagery). Picked deliberately over TorchGeo's other pretrained options (Sentinel-2 at 10 m/px, Landsat at 30 m/px) since NAIP is the closest available domain match to this project's own aerial orthophoto imagery — the others would see an entire bike lane as at most a sub-pixel smudge. Classifier head replaced with `Identity()`, keeping the 1024-dim pooled embedding.
+- **reference examples** — `data/input/textures/<label>/*.png`, one subfolder per class. Currently: `bikelane` (2 hand-picked lane-paint crops) and `negative` (road, sidewalk, and 4 rooftops — rooftops specifically needed several examples spanning different roof colors; one wasn't enough to generalize).
+- **classification: `discriminant_score`, not raw similarity** — plain nearest-neighbor cosine similarity against individual references doesn't work here: pairwise similarity between *any* two reference crops stays high (0.75–0.95) almost regardless of class, so a different-class pair can score higher than a same-class pair (`texture_analysis.py`'s report catches this directly). `discriminant_score` instead projects a candidate embedding onto the direction between the two classes' mean embeddings — still zero training, just arithmetic on frozen embeddings, but isolates the component that actually separates the classes rather than whatever's common to all pavement-like patches. See `texture_embedding.py`'s module docstring for the numbers that motivated this.
+- **orthophoto caveat** — this imagery is a *standard* orthophoto (terrain-corrected only, not a *true* ortho built from a full surface model), so tall objects like buildings show relief displacement: a rooftop's visible pixels are offset from the building's true OSM footprint, confirmed by overlaying OSM building polygons directly on the imagery. That's why rooftop confusion was fixed with more reference *pixel* examples rather than by subtracting building footprints from the mask — footprint subtraction would remove pixels at the building's true ground position while the displaced, visible rooftop pixels stayed untouched.
+
+### Analysis / diagnostics
+
+```bash
+uv run python -m scripts.texture_analysis                                      # pairwise reference-embedding similarity report
+uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <width> <height>  # scan + visualize one region
+```
+
+The second form runs the actual sliding-window detector (`TextureEmbeddingDetector`, 22px window / 11px stride by default) over the given pixel window and saves `texture_scan_result.png`: raw RGB, continuous discriminant-score heatmap, and the thresholded detection mask, side by side. Slow — ~90s for an ~870x580 region on this machine's MPS backend (the backbone runs at ~28ms/image regardless of batching) — not something to run over a whole tile or all 6 tiles in one sitting.
+
+### Not yet done
+
+- Not wired into `detect.py` as a selectable option (still hardcodes `YoloSegDetector`).
+- Never run across all 6 tiles in one go — a single full 5000x5000 tile takes on the order of 20-30 minutes at the default (highest-resolution) window/stride settings, so batch-processing all 6 wasn't attempted; validated on bounded regions, individual crops, and one full tile.
+
+`SCORE_THRESHOLD` (0.10, in `detection/texture_detector.py`) is calibrated from this session's validation crops, not guessed: every genuine lane-paint crop tested scored +0.16 to +0.25, every clean negative scored ≤ -0.10, and the one edge case (a partially-shadowed rooftop) scored +0.042 — still below the lowest lane score. 0.10 sits strictly between the highest validated negative and the lowest validated positive score, so it fixes that edge case as a side effect too. (The original default, 0.0, was too loose — the continuous heatmap cleanly traced real lane paint, but the thresholded mask also picked up a lot of plain street, since much of it still scored weakly positive.)
 
 ## Known limitations
 

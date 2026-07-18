@@ -8,6 +8,10 @@ INPUT_TILES_DIR = PROJECT_ROOT / "data" / "input" / "idop_kacheln"
 OSM_CACHE_PATH = PROJECT_ROOT / "data" / "osm" / "osm_features.gpkg"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 
+# Reference crops for scripts/texture_embedding.py, one subfolder per label
+# (e.g. "bikelane", "negative").
+TEXTURES_DIR = PROJECT_ROOT / "data" / "input" / "textures"
+
 # The IDOP20 tiles are delivered as ETRS89 / UTM zone 32N.
 TILE_CRS = "EPSG:25832"
 OSM_CRS = "EPSG:4326"
