@@ -73,7 +73,7 @@ NODATA_VALUE = BACKGROUND_LABEL
 #                background outside the buffer), rather than attempt
 #                correction -- for imagery where shadow correction still
 #                distorts too much of the tile to be usable
-SHADOW_HANDLING = "correct"
+SHADOW_HANDLING = "cut"
 
 # When SHADOW_HANDLING is "cut", pixels within this margin of the detected
 # shadow mask are cut too, not just the mask itself. Real shadow edges are

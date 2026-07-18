@@ -1,4 +1,5 @@
 names:
-  0: Red Bike Lane
+  0: Bikelane
+  1: bikeoverroad
 path: .
 train: train.txt
