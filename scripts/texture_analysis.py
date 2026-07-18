@@ -24,6 +24,17 @@ part of any automated flow. Two things live here:
   region you already have some expectation for, not routine use:
 
       uv run python -m scripts.texture_analysis data/output/foo.tif 80 1990 870 580
+
+- `visualize_edge_trace` -- runs the coarse CNN detector, then
+  detection/edge_trace.py's classical color-based edge tracer, over one
+  bounded region; saves a 3-panel PNG (RGB | coarse window-block mask |
+  traced pixel-precise mask) and prints width statistics from the traced
+  mask via detection/width.py. The coarse mask alone is not precise enough
+  to measure width from (its shape is the scan window's footprint, not the
+  lane's -- see edge_trace.py's module docstring); this is the step that
+  makes width measurement meaningful:
+
+      uv run python -m scripts.texture_analysis edges data/output/foo.tif 80 1990 870 580
 """
 
 import sys
@@ -36,7 +47,9 @@ from PIL import Image
 from rasterio.windows import Window
 
 from scripts.config import TEXTURES_DIR
+from scripts.detection.edge_trace import BikeLaneEdgeDetector
 from scripts.detection.texture_detector import TextureEmbeddingDetector
+from scripts.detection.width import measure_width_m
 from scripts.texture_embedding import cosine_similarity, load_references
 
 
@@ -124,24 +137,81 @@ def visualize_scan(
     print(f"Wrote {output_path}  ({len(detections)} detection(s), mean score {mean_score})")
 
 
+def visualize_edge_trace(tile_path: Path, window: Window, output_path: Path) -> None:
+    """Scan `window` of `tile_path` and save a 3-panel PNG: RGB | coarse CNN mask | traced mask.
+
+    Also prints width statistics (detection/width.py) measured from the
+    traced mask -- the coarse mask's shape is the scan window's footprint,
+    not the lane's, so only the traced mask is meaningful to measure.
+    """
+    coarse_detector = TextureEmbeddingDetector()
+    edge_detector = BikeLaneEdgeDetector(coarse_detector=coarse_detector)
+    with rasterio.open(tile_path) as src:
+        rgb = src.read([1, 2, 3], window=window)
+        pixel_size_m = src.res[0]
+    image = np.transpose(rgb, (1, 2, 0))
+
+    coarse_detections = coarse_detector.predict(image)
+    coarse_mask = coarse_detections[0].mask if coarse_detections else np.zeros(image.shape[:2], dtype=bool)
+
+    edge_detections = edge_detector.predict(image)
+    traced_mask = np.zeros(image.shape[:2], dtype=bool)
+    for detection in edge_detections:
+        traced_mask |= detection.mask
+
+    def overlay(mask: np.ndarray, color: tuple[float, float, float]) -> np.ndarray:
+        blended = image.astype(np.float32)
+        blended[mask] = blended[mask] * 0.5 + np.array(color) * 0.5
+        return blended.astype(np.uint8)
+
+    coarse_panel = overlay(coarse_mask, (0.0, 255.0, 0.0))
+    traced_panel = overlay(traced_mask, (0.0, 255.0, 255.0))
+
+    combined = Image.new("RGB", (image.shape[1] * 3 + 20, image.shape[0]), "white")
+    combined.paste(Image.fromarray(image), (0, 0))
+    combined.paste(Image.fromarray(coarse_panel), (image.shape[1] + 10, 0))
+    combined.paste(Image.fromarray(traced_panel), (image.shape[1] * 2 + 20, 0))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    combined.save(output_path)
+
+    print(f"Wrote {output_path}  (coarse px {coarse_mask.sum()}, traced px {traced_mask.sum()})")
+    print(f"{len(edge_detections)} traced segment(s):")
+    for i, detection in enumerate(sorted(edge_detections, key=lambda d: -d.mask.sum())):
+        stats = measure_width_m(detection.mask, pixel_size_m)
+        stats_str = (
+            f"mean={stats.mean_m:.2f}m median={stats.median_m:.2f}m "
+            f"min={stats.min_m:.2f}m max={stats.max_m:.2f}m n={stats.n_samples}"
+            if stats
+            else "n/a"
+        )
+        print(f"  segment {i} ({detection.mask.sum()} px): {stats_str}")
+
+
 def main() -> None:
     args = sys.argv[1:]
     if not args:
         print_report()
         return
 
+    if args[0] == "edges":
+        args = args[1:]
+        mode = "edges"
+    else:
+        mode = "scan"
+
     if len(args) != 5:
         print("Usage:")
-        print("  uv run python -m scripts.texture_analysis                          # pairwise reference report")
-        print("  uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <w> <h>  # scan + visualize a region")
+        print("  uv run python -m scripts.texture_analysis                             # pairwise reference report")
+        print("  uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <w> <h>        # scan + visualize a region")
+        print("  uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <w> <h>  # coarse + edge-trace + width")
         sys.exit(1)
 
     tile_path, x, y, width, height = args
-    visualize_scan(
-        Path(tile_path),
-        Window(int(x), int(y), int(width), int(height)),
-        Path("texture_scan_result.png"),
-    )
+    window = Window(int(x), int(y), int(width), int(height))
+    if mode == "edges":
+        visualize_edge_trace(Path(tile_path), window, Path("texture_edge_trace_result.png"))
+    else:
+        visualize_scan(Path(tile_path), window, Path("texture_scan_result.png"))
 
 
 if __name__ == "__main__":

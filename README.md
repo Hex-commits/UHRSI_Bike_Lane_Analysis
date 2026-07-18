@@ -85,6 +85,7 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `detection/dataset.py` — converts CVAT YOLO-seg exports (drawn on the full 5000x5000 tiles) into a chipped, trainable YOLO dataset
 - `detection/yolo_seg_detector.py` — current adapter: loads a fine-tuned YOLO-seg checkpoint, runs inference on a chip
 - `detection/texture_detector.py` — `Detector` adapter for texture_embedding.py: sliding-window scan + discriminant scoring
+- `detection/edge_trace.py` — `Detector` adapter combining the above coarse scan with classical color-based edge tracing, for a mask precise enough to measure width from (see Width measurement below)
 - `detection/tiling.py` — chips a tile into windows for inference, maps masks back to tile pixel/geo coordinates
 - `detection/width.py` — skeletonize + distance transform → width stats, model-agnostic (works on any mask)
 - `detection/rasterize.py` — burns a numeric field (score, width_mean_m, ...) from the detections into a GeoTIFF aligned to the source tile grid, plus a colorized PNG preview (raw single-band GeoTIFFs render as flat grayscale in a plain image viewer without one)
@@ -190,11 +191,14 @@ A third approach, alongside YOLO and the dropped classical color+shape detector:
 ### Analysis / diagnostics
 
 ```bash
-uv run python -m scripts.texture_analysis                                      # pairwise reference-embedding similarity report
-uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <width> <height>  # scan + visualize one region
+uv run python -m scripts.texture_analysis                                            # pairwise reference-embedding similarity report
+uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <width> <height>        # scan + visualize one region
+uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <width> <height>  # coarse scan + edge trace + width
 ```
 
 The second form runs the actual sliding-window detector (`TextureEmbeddingDetector`, 22px window / 11px stride by default) over the given pixel window and saves `texture_scan_result.png`: raw RGB, continuous discriminant-score heatmap, and the thresholded detection mask, side by side. Slow — ~90s for an ~870x580 region on this machine's MPS backend (the backbone runs at ~28ms/image regardless of batching) — not something to run over a whole tile or all 6 tiles in one sitting.
+
+The third form (`edges`) additionally runs `BikeLaneEdgeDetector` (see Width measurement below) and saves `texture_edge_trace_result.png`: RGB, the coarse window-block mask, and the pixel-precise traced mask, side by side — plus prints width statistics per traced segment to stdout.
 
 ### Not yet done
 
@@ -202,6 +206,18 @@ The second form runs the actual sliding-window detector (`TextureEmbeddingDetect
 - Never run across all 6 tiles in one go — a single full 5000x5000 tile takes on the order of 20-30 minutes at the default (highest-resolution) window/stride settings, so batch-processing all 6 wasn't attempted; validated on bounded regions, individual crops, and one full tile.
 
 `SCORE_THRESHOLD` (0.10, in `detection/texture_detector.py`) is calibrated from this session's validation crops, not guessed: every genuine lane-paint crop tested scored +0.16 to +0.25, every clean negative scored ≤ -0.10, and the one edge case (a partially-shadowed rooftop) scored +0.042 — still below the lowest lane score. 0.10 sits strictly between the highest validated negative and the lowest validated positive score, so it fixes that edge case as a side effect too. (The original default, 0.0, was too loose — the continuous heatmap cleanly traced real lane paint, but the thresholded mask also picked up a lot of plain street, since much of it still scored weakly positive.)
+
+### Width measurement (`detection/edge_trace.py`)
+
+`TextureEmbeddingDetector`'s mask isn't precise enough to measure width from directly: it's stamped in 22px (4.4m) window blocks, more than twice the width of a real lane (~10px/2m — see `TRAINING_CHIP_SIZE_PX` comment in `config.py`), so its cross-track shape is the scan window's footprint, not the lane's. `BikeLaneEdgeDetector` treats that coarse mask purely as a region-of-interest, then finds the true edges within it by classical HSV color thresholding — a signal precise down to the pixel — and feeds the result to `detection/width.py`'s `measure_width_m`.
+
+The color thresholds (`EDGE_HUE_TOLERANCE=0.15`, `EDGE_MIN_SATURATION=0.07`) are deliberately *not* reused from `redness.py`: that module's thresholds are calibrated for an enhancement pass (better to touch too much than too little) and, tried here first, recalled only ~55% of true path pixels in a real cycle-track crop — tree-branch shadow dappling causes local hue/saturation dropout — producing a speckled mask whose width came out noisy (0.40–5.26m spread along one path). The values above were sourced by sampling real path vs. real adjacent-sidewalk pixels from that same crop and sweeping for a looser hue tolerance that recovers much more of the true path (~72% recall) while keeping the false-positive rate against the neighboring surface low (~0.8%).
+
+One real width measurement isn't one pixel-blob: the traced mask is split into connected components (`scipy.ndimage.label`) and each gets its own `Detection`, so a fragment that breaks off the main path (a drain cover, a gap the color threshold missed) doesn't get averaged into the same statistic as the real lane segment.
+
+**Shape regularization.** The color-threshold mask alone still isn't a lane's actual shape — it inherits every local dropout (shade dappling) and bulge (a similarly-colored fragment bleeding in) pixel by pixel, so its raw edges are noisy and its raw centerline zigzags, when a real lane holds close to one width and runs straight or gently curving. `_regularize_band` fixes both, per component: morphologically **opens** the mask at close to its own radius before deriving a centerline at all (skeletonizing the raw mask directly tends to produce small loops/branch points at bulges, not just prunable dead-end spurs), skeletonizes *that*, prunes remaining spurs, takes the **median** distance-to-edge along what's left (evaluated against the original unopened mask, so the opening doesn't bias the width estimate), then orders and moving-average-smooths that centerline and redraws the mask as a constant-radius band around it.
+
+Tested on a real cycle-track crop: before regularization, width came out at a noisy 0.40–6.66m spread within single segments (visibly blobby/wiggly in the traced mask). After: 3 segments, each mean/median in the 3.1–4.1m range with a tight ±0.5–0.8m spread — matching a plausible raised cycle track, and visibly a smooth constant-width band in the output PNG. Trade-off: the opening step that fixes the shape also erodes thin bridges between blobby-but-connected regions, so the same path can come back as *more, shorter* segments than before regularization — cleaner shape per segment, more gaps between segments. Not yet tuned further (e.g. bridging larger gaps with a wider closing pass before opening).
 
 ## Known limitations
 
