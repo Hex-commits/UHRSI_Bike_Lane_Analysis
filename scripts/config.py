@@ -54,8 +54,12 @@ OSM_TAGS = {
 
 # Buffer applied around each feature's centerline, in meters. Streets get a
 # wider buffer since they cover a full carriageway rather than a single lane.
-BIKE_LANE_BUFFER_METERS = 6.0
-STREET_BUFFER_METERS = 8.0
+# Narrowed from 6.0/8.0 -- the wider buffer was generous enough to routinely
+# bleed onto adjacent building rooftops in dense blocks (see Known
+# limitations), and still comfortably covers a real lane (~1.5-3 m) or
+# carriageway (~5-7 m) with margin at these values.
+BIKE_LANE_BUFFER_METERS = 4.5
+STREET_BUFFER_METERS = 6.0
 
 # Integer labels written to the classification band.
 BACKGROUND_LABEL = 0
@@ -73,7 +77,10 @@ NODATA_VALUE = BACKGROUND_LABEL
 #                background outside the buffer), rather than attempt
 #                correction -- for imagery where shadow correction still
 #                distorts too much of the tile to be usable
-SHADOW_HANDLING = "cut"
+#   "none"    -- leave shadowed pixels untouched (still detected, so the
+#                shadow band is populated, but nothing about the imagery
+#                itself is modified or removed)
+SHADOW_HANDLING = "none"
 
 # When SHADOW_HANDLING is "cut", pixels within this margin of the detected
 # shadow mask are cut too, not just the mask itself. Real shadow edges are
@@ -82,6 +89,13 @@ SHADOW_HANDLING = "cut"
 # Cutting only exactly at the mask boundary would keep those, leaving a
 # sharp edge between "cut" and "retained but still slightly shadowed".
 SHADOW_CUT_MARGIN_M = 1.0
+
+# Whether to boost the saturation of reddish pixels within the road/bike-lane
+# mask, so painted bike-lane paint stands out more from gray asphalt (see
+# scripts/redness.py). Unlike a generic contrast stretch, this only touches
+# pixels that already read as red -- gray asphalt, vegetation, etc. are
+# unaffected.
+APPLY_RED_BOOST = True
 
 # Integer labels written to the shadow band.
 NOT_SHADOW_LABEL = 0

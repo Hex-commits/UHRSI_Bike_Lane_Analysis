@@ -4,7 +4,8 @@ Filters Münster aerial imagery down to the bike lane / street network, for ML t
 
 - bike lane + street geometry from OpenStreetMap
 - imagery masked to a buffer around that geometry
-- shadows detected, then either brightness-corrected or cut entirely (configurable)
+- shadows detected, then brightness-corrected, cut entirely, or left untouched (configurable)
+- reddish (bike-lane paint) pixels get a saturation boost, so they stand out more against gray asphalt
 - classification + shadow bands appended to the output
 
 ## Research Paper
@@ -74,7 +75,8 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `osm_features.py` — queries OSM for bike lanes/streets, classifies each feature, caches to GeoPackage
 - `mask.py` — buffers + dissolves geometry per category, rasterizes onto a tile's grid
 - `shadows.py` — detects shadow via a blue-excess index, cleans up the mask, brightens shadowed pixels using a local sunlit reference per band
-- `filter_imagery.py` — ties it together: masks, handles shadows per `SHADOW_HANDLING` (correct or cut), appends classification + shadow bands, writes the GeoTIFF
+- `redness.py` — boosts saturation of reddish (bike-lane paint) pixels within the road/bike-lane mask
+- `filter_imagery.py` — ties it together: masks, handles shadows per `SHADOW_HANDLING` (correct, cut, or none), boosts red pixels if `APPLY_RED_BOOST`, appends classification + shadow bands, writes the GeoTIFF
 - `inspect.py` — CLI to get a tile's dimensions and band info
 - `detection/base.py` — the model swap point: `Detector` protocol, `Detection` type. Nothing else in the detection code depends on a specific model.
 - `detection/dataset.py` — converts CVAT YOLO-seg exports (drawn on the full 5000x5000 tiles) into a chipped, trainable YOLO dataset
@@ -85,12 +87,13 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 
 ## Shadow handling
 
-`SHADOW_HANDLING` in `config.py` picks one of two strategies for shadowed pixels within the road/bike-lane buffer:
+`SHADOW_HANDLING` in `config.py` picks one of three strategies for shadowed pixels within the road/bike-lane buffer:
 
-- `"correct"` (default) — brightness-normalize them to match nearby sunlit pixels, described below.
+- `"correct"` — brightness-normalize them to match nearby sunlit pixels, described below.
 - `"cut"` — drop them entirely: zeroed to `NODATA_VALUE` and reclassified as background, exactly like pixels outside the buffer. For imagery where correction still distorts too much of the tile to be usable, this trades shadowed coverage away entirely rather than keeping a degraded version of it. Also cuts a further `SHADOW_CUT_MARGIN_M` (1 m default) beyond the detected shadow mask, since a real shadow's edge is a soft penumbra that the mask's hard Otsu threshold cuts straight through — cutting only exactly at the mask would still retain a ring of partially-shadowed pixels just outside it, leaving a hard edge anyway.
+- `"none"` (default) — leave shadowed pixels exactly as they are in the source imagery. No brightness correction, nothing cut. Both `"correct"` and `"cut"` turned out to still leave visible artifacts (a correction that doesn't quite match, or literal holes in the imagery); `"none"` is the fallback of doing nothing to them at all.
 
-Either way, the shadow band (see Output format) records which pixels were shadowed, even under `"cut"` where those pixels end up as background/nodata in every other band; it reflects detection only, not the cut margin.
+Either way, the shadow band (see Output format) records which pixels were shadowed, even under `"cut"` where those pixels end up as background/nodata in every other band, or `"none"` where the imagery itself is unmodified; it reflects detection only, not the cut margin.
 
 ### Correction (`"correct"`)
 
@@ -115,6 +118,16 @@ Also found and fixed two bugs, both specific to shadows wider than the 15 m refe
   - pixel value + its offset
   - nearest *shadow* pixel's own offset, via a Euclidean distance transform from the shadow mask, scaled by `1 − distance/BLEED_RADIUS_M` (clamped to 0–1) and added to sunlit pixels within `BLEED_RADIUS_M` of the mask
 - result clipped back to 0–255 and cast back to the original dtype
+
+## Red boost
+
+`APPLY_RED_BOOST` in `config.py` (on by default) boosts the saturation of reddish pixels within the road/bike-lane buffer, so painted bike-lane paint stands out more from gray asphalt — see `scripts/redness.py`.
+
+- convert to HSV; pixels within `RED_HUE_TOLERANCE` (~29°) of pure red *and* above `MIN_SATURATION_FOR_BOOST` (0.05) qualify — the saturation floor keeps hue-is-noisy near-gray pixels from getting pulled in
+- qualifying pixels: saturation × `SATURATION_BOOST` (1.8), clamped to 1.0; hue and value untouched
+- convert back to RGB
+
+Deliberately narrower than a generic contrast stretch (tried earlier and reverted for introducing artifacts elsewhere in the tile): this only touches pixels that already read as red, so gray asphalt and vegetation are unaffected. Hue/saturation ranges are calibrated against the one hand-annotated instance in this repo (paint pixels: hue ~9-17°, saturation ~0.11-0.30). Not selective for *lane* paint specifically — any sufficiently red object in the buffer (a parked red car, for instance) gets boosted too.
 
 ## Output format
 
@@ -164,6 +177,6 @@ This is a data-quantity problem, not a pipeline bug: unlike the zero-shot attemp
 ## Known limitations
 
 - **OSM gaps** — bike lane mapping stops abruptly where OSM data is incomplete, not where the lane physically ends. Including streets alongside dedicated lanes covers most of this.
-- **Buffer bleeds onto buildings** — in dense blocks, narrow streets mean the buffer overlaps adjacent rooftops. Not fixed yet; likely fix is subtracting OSM building footprints from the buffer.
+- **Buffer bleeds onto buildings** — in dense blocks, narrow streets mean the buffer overlaps adjacent rooftops. `BIKE_LANE_BUFFER_METERS`/`STREET_BUFFER_METERS` were narrowed (6.0/8.0 → 4.5/6.0) to reduce this, but it's a mitigation, not a fix — still happens in tight blocks. The actual fix would be subtracting OSM building footprints from the buffer.
 - **Shadow correction is statistical, not physical** — brightens using nearby sunlit pixels, doesn't reconstruct real detail in deep shadow, no sun-angle/DSM data involved. Mainly, because we don't have the data for it.
 - **YOLO only sees RGB** — `detection/tiling.py` and `detection/dataset.py` both read bands `[1, 2, 3]` only, so the infrared band (and the classification/shadow bands) are computed but never reach the model. CoCo-Weights are being used, they are expecting 3 bands and not more. Adding infrared would mean a 4-channel first conv layer (losing direct compatibility with the pretrained RGB checkpoint's weights for that layer) and a custom dataset loader, since chips are currently exported as plain 3-channel PNGs. Not attempted yet.
