@@ -46,7 +46,8 @@ import rasterio
 from PIL import Image
 from rasterio.windows import Window
 
-from scripts.config import TEXTURES_DIR
+from scripts.config import TEXTURE_STRIDE_PX, TEXTURES_DIR
+from scripts.detection.base import Detection
 from scripts.detection.edge_trace import BikeLaneEdgeDetector
 from scripts.detection.texture_detector import TextureEmbeddingDetector
 from scripts.detection.width import measure_width_m
@@ -137,14 +138,21 @@ def visualize_scan(
     print(f"Wrote {output_path}  ({len(detections)} detection(s), mean score {mean_score})")
 
 
-def visualize_edge_trace(tile_path: Path, window: Window, output_path: Path) -> None:
+def visualize_edge_trace(
+    tile_path: Path,
+    window: Window,
+    output_path: Path,
+    coarse_detector: TextureEmbeddingDetector | None = None,
+) -> list[Detection]:
     """Scan `window` of `tile_path` and save a 3-panel PNG: RGB | coarse CNN mask | traced mask.
 
     Also prints width statistics (detection/width.py) measured from the
     traced mask -- the coarse mask's shape is the scan window's footprint,
     not the lane's, so only the traced mask is meaningful to measure.
+    Returns the traced-mask detections, so a caller that also wants width
+    stats (e.g. generate_pipeline_report.py) doesn't have to re-run the scan.
     """
-    coarse_detector = TextureEmbeddingDetector()
+    coarse_detector = coarse_detector or TextureEmbeddingDetector()
     edge_detector = BikeLaneEdgeDetector(coarse_detector=coarse_detector)
     with rasterio.open(tile_path) as src:
         rgb = src.read([1, 2, 3], window=window)
@@ -154,7 +162,7 @@ def visualize_edge_trace(tile_path: Path, window: Window, output_path: Path) -> 
     coarse_detections = coarse_detector.predict(image)
     coarse_mask = coarse_detections[0].mask if coarse_detections else np.zeros(image.shape[:2], dtype=bool)
 
-    edge_detections = edge_detector.predict(image)
+    edge_detections = edge_detector.predict(image, coarse=coarse_detections)
     traced_mask = np.zeros(image.shape[:2], dtype=bool)
     for detection in edge_detections:
         traced_mask |= detection.mask
@@ -185,6 +193,7 @@ def visualize_edge_trace(tile_path: Path, window: Window, output_path: Path) -> 
             else "n/a"
         )
         print(f"  segment {i} ({detection.mask.sum()} px): {stats_str}")
+    return edge_detections
 
 
 def main() -> None:
@@ -199,19 +208,26 @@ def main() -> None:
     else:
         mode = "scan"
 
-    if len(args) != 5:
+    if len(args) not in (5, 6):
         print("Usage:")
-        print("  uv run python -m scripts.texture_analysis                             # pairwise reference report")
-        print("  uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <w> <h>        # scan + visualize a region")
-        print("  uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <w> <h>  # coarse + edge-trace + width")
+        print("  uv run python -m scripts.texture_analysis                                          # pairwise reference report")
+        print("  uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <w> <h> [stride_px]        # scan + visualize a region")
+        print("  uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <w> <h> [stride_px]  # coarse + edge-trace + width")
+        print()
+        print(f"  stride_px overrides TEXTURE_STRIDE_PX (config.py, default {TEXTURE_STRIDE_PX}) for this run")
+        print("  only -- smaller means a finer-resolution scan (more overlapping sample points), at")
+        print("  roughly (default/stride_px)^2 the compute cost. Only practical on a bounded cutout like")
+        print("  this, not a whole tile -- see TEXTURE_STRIDE_PX's comment in config.py for the full-tile cost.")
         sys.exit(1)
 
-    tile_path, x, y, width, height = args
+    tile_path, x, y, width, height = args[:5]
+    stride_px = int(args[5]) if len(args) == 6 else TEXTURE_STRIDE_PX
     window = Window(int(x), int(y), int(width), int(height))
+    detector = TextureEmbeddingDetector(stride_px=stride_px)
     if mode == "edges":
-        visualize_edge_trace(Path(tile_path), window, Path("texture_edge_trace_result.png"))
+        visualize_edge_trace(Path(tile_path), window, Path("texture_edge_trace_result.png"), coarse_detector=detector)
     else:
-        visualize_scan(Path(tile_path), window, Path("texture_scan_result.png"))
+        visualize_scan(Path(tile_path), window, Path("texture_scan_result.png"), detector=detector)
 
 
 if __name__ == "__main__":

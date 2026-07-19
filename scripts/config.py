@@ -138,3 +138,26 @@ DETECTION_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelanes.gpkg"
 # Fields burned into a GeoTIFF each (data/detections/bikelanes_<field>.tif),
 # for visual inspection without GIS software / overlay against data/output/.
 DETECTION_RASTER_FIELDS = ["score", "width_mean_m"]
+
+# --- Detection: texture-embedding CNN scan (see scripts/detection/texture_detector.py) ---
+
+# Sliding-window crop size, in pixels, fed to the frozen backbone. Matches
+# the reference crops under TEXTURES_DIR -- deliberately NOT a knob to
+# increase for "more resolution": a bigger window was tried and rejected,
+# since it dilutes/averages across more of the surrounding surface per
+# window and measurably hurt classification quality despite needing less
+# upsampling to the model's fixed 256px input.
+TEXTURE_WINDOW_PX = 22
+
+# Step size, in pixels, between successive scan windows -- this is what
+# actually controls the *resolution* of the resulting score map/heatmap:
+# smaller stride means more overlapping sample points and a finer, less
+# blocky result, at roughly (TEXTURE_STRIDE_PX / new_stride)^2 the compute
+# cost (window count grows quadratically as stride shrinks). 11 (50%
+# overlap) is the default used for full-tile runs -- a full 5000x5000 tile
+# already takes ~23 minutes at this setting, so a smaller stride is only
+# practical scoped to a bounded cutout, not a whole tile; pass a smaller
+# stride_px to TextureEmbeddingDetector's constructor (or via
+# `texture_analysis`'s CLI) for a one-off higher-resolution scan of a
+# cutout, rather than lowering this default.
+TEXTURE_STRIDE_PX = 11

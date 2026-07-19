@@ -8,6 +8,8 @@ Filters Münster aerial imagery down to the bike lane / street network, for ML t
 - reddish (bike-lane paint) pixels get a saturation boost, so they stand out more against gray asphalt
 - classification + shadow bands appended to the output
 
+**[docs/pipeline_report.md](docs/pipeline_report.md)** — a figure per pipeline stage (raw imagery → OSM mask → shadow detection → red boost → prefiltered output → CNN scan → edge tracing/regularization/bridging → width measurement) on one fixed worked example, for reference in writeups. Regenerate after any pipeline change with `uv run python -m scripts.generate_pipeline_report` (takes well under a minute — it's scoped to one small region, not a full tile).
+
 ## Research Paper
 
 We found a research paper that classified, whether a road had a bikelane or not, however it did do that with a static bounding box and YOLO.
@@ -81,6 +83,7 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `inspect.py` — CLI to get a tile's dimensions and band info
 - `texture_embedding.py` — frozen pretrained-CNN feature extractor + discriminant-score classification (see Texture-embedding detector below)
 - `texture_analysis.py` — CLI diagnostics for the above: reference-set similarity report, and scan-a-region visualization
+- `generate_pipeline_report.py` — regenerates `docs/pipeline_report.md`, a visual walkthrough of every stage on one fixed example region (see below)
 - `detection/base.py` — the model swap point: `Detector` protocol, `Detection` type. Nothing else in the detection code depends on a specific model.
 - `detection/dataset.py` — converts CVAT YOLO-seg exports (drawn on the full 5000x5000 tiles) into a chipped, trainable YOLO dataset
 - `detection/yolo_seg_detector.py` — current adapter: loads a fine-tuned YOLO-seg checkpoint, runs inference on a chip
@@ -151,7 +154,7 @@ Two phases, two scripts. Both operate on the prefiltered `data/output/*.tif` til
 
 **We tried zero-shot first (OWLv2, then YOLO-World) and dropped it.** Neither has ever seen top-down aerial orthophoto imagery, only ground-level natural photos, and it showed on real test chips: text prompts scored ~0.02–0.09 confidence (noise); image-exemplar/large-checkpoint attempts scored confidently but matched whole chips or unrelated features (rooftops, tree canopy), not lanes. A domain gap zero-shot prompting doesn't bridge. See git history if you want the details — this README now only covers the current approach.
 
-**Also tried a classical (non-ML) color+shape detector and dropped it.** Otsu-adaptive red/white color splits plus shape filtering (elongated, constant-width) found real lane paint in isolation, but at full-tile scale it couldn't reliably separate lane paint from other similarly-colored surfaces in this imagery -- terracotta rooftops (near-identical redness/hue to the paint) and bare dirt/leaf-litter ground under winter trees both cleared the same color thresholds. Shape and border filtering cut down but didn't eliminate either confound. See git history if you want the details.
+**We also tried a classical (non-ML) color+shape detector and dropped it.** Otsu-adaptive red/white color splits plus shape filtering (elongated, constant-width) found real lane paint in isolation, but at full-tile scale it couldn't reliably separate lane paint from other similarly-colored surfaces in this imagery -- terracotta rooftops (near-identical redness/hue to the paint) and bare dirt/leaf-litter ground under winter trees both cleared the same color thresholds. Shape and border filtering cut down but didn't eliminate either confound. See git history if you want the details.
 
 ### Training
 
@@ -191,14 +194,16 @@ A third approach, alongside YOLO and the dropped classical color+shape detector:
 ### Analysis / diagnostics
 
 ```bash
-uv run python -m scripts.texture_analysis                                            # pairwise reference-embedding similarity report
-uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <width> <height>        # scan + visualize one region
-uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <width> <height>  # coarse scan + edge trace + width
+uv run python -m scripts.texture_analysis                                                      # pairwise reference-embedding similarity report
+uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <width> <height> [stride_px]      # scan + visualize one region
+uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <width> <height> [stride_px] # coarse scan + edge trace + width
 ```
 
-The second form runs the actual sliding-window detector (`TextureEmbeddingDetector`, 22px window / 11px stride by default) over the given pixel window and saves `texture_scan_result.png`: raw RGB, continuous discriminant-score heatmap, and the thresholded detection mask, side by side. Slow — ~90s for an ~870x580 region on this machine's MPS backend (the backbone runs at ~28ms/image regardless of batching) — not something to run over a whole tile or all 6 tiles in one sitting.
+The second form runs the actual sliding-window detector (`TextureEmbeddingDetector`, `TEXTURE_WINDOW_PX`/`TEXTURE_STRIDE_PX` in `config.py`, 22px/11px by default) over the given pixel window and saves `texture_scan_result.png`: raw RGB, continuous discriminant-score heatmap, and the thresholded detection mask, side by side. Slow — ~90s for an ~870x580 region on this machine's MPS backend (the backbone runs at ~28ms/image regardless of batching) — not something to run over a whole tile or all 6 tiles in one sitting.
 
 The third form (`edges`) additionally runs `BikeLaneEdgeDetector` (see Width measurement below) and saves `texture_edge_trace_result.png`: RGB, the coarse window-block mask, and the pixel-precise traced mask, side by side — plus prints width statistics per traced segment to stdout.
+
+The optional `stride_px` overrides `TEXTURE_STRIDE_PX` for that one run — smaller means a finer-resolution score map/heatmap (more overlapping sample points instead of the same score block-stamped over a wider area), at roughly `(11 / stride_px)²` the compute cost, since window count grows quadratically as stride shrinks. Only practical scoped to a bounded cutout like this CLI takes, not a whole tile — `TEXTURE_STRIDE_PX`'s default (11) already takes ~23 minutes over a full 5000x5000 tile; `stride_px=4` (~7.6x the cost) took ~3 minutes over a ~750x180 cutout and produced consistent results with the default (main segment mean width 2.71m vs. 2.81m) — a sharper score map, not a different answer, on the region tested so far.
 
 ### Not yet done
 

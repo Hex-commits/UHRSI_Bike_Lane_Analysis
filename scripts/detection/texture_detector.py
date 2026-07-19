@@ -17,12 +17,10 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.config import TEXTURES_DIR
+from scripts.config import TEXTURE_STRIDE_PX, TEXTURE_WINDOW_PX, TEXTURES_DIR
 from scripts.detection.base import Detection
 from scripts.texture_embedding import discriminant_direction, embed_batch, load_references
 
-WINDOW_PX = 22
-STRIDE_PX = 11
 BATCH_SIZE = 64
 
 # Calibrated from this session's validation crops, not guessed: every genuine
@@ -41,8 +39,8 @@ class TextureEmbeddingDetector:
     def __init__(
         self,
         textures_dir: Path = TEXTURES_DIR,
-        window_px: int = WINDOW_PX,
-        stride_px: int = STRIDE_PX,
+        window_px: int = TEXTURE_WINDOW_PX,
+        stride_px: int = TEXTURE_STRIDE_PX,
         threshold: float = SCORE_THRESHOLD,
     ):
         references = load_references(textures_dir)

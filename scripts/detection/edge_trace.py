@@ -2,7 +2,7 @@
 
 texture_detector.TextureEmbeddingDetector answers "is there bike-lane paint
 somewhere in this window" -- useful for finding lanes, but its mask is
-stamped in WINDOW_PX blocks (22px = 4.4m at this imagery's 0.2m/px), well
+stamped in TEXTURE_WINDOW_PX blocks (22px = 4.4m at this imagery's 0.2m/px), well
 over twice the width of a real lane (~10px/2m, see config.py's
 TRAINING_CHIP_SIZE_PX comment). A width measurement taken directly from that
 mask would measure the window grid, not the lane.
@@ -291,8 +291,14 @@ class BikeLaneEdgeDetector:
     def __init__(self, coarse_detector: TextureEmbeddingDetector | None = None):
         self._coarse = coarse_detector or TextureEmbeddingDetector()
 
-    def predict(self, image: np.ndarray) -> list[Detection]:
-        coarse = self._coarse.predict(image)
+    def predict(self, image: np.ndarray, coarse: list[Detection] | None = None) -> list[Detection]:
+        """`coarse` lets a caller that already ran (or otherwise obtained) the
+        coarse scan pass it in directly, instead of paying for another run of
+        the CNN sliding-window scan here -- it's by far the most expensive
+        step in this pipeline.
+        """
+        if coarse is None:
+            coarse = self._coarse.predict(image)
         if not coarse:
             return []
 
