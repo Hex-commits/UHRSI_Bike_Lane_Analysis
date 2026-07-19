@@ -8,7 +8,7 @@ Filters Münster aerial imagery down to the bike lane / street network, for ML t
 - reddish (bike-lane paint) pixels get a saturation boost, so they stand out more against gray asphalt
 - classification + shadow bands appended to the output
 
-**[docs/pipeline_report.md](docs/pipeline_report.md)** — a figure per pipeline stage (raw imagery → OSM mask → shadow detection → red boost → prefiltered output → CNN scan → edge tracing/regularization/bridging → width measurement) on one fixed worked example, for reference in writeups. Regenerate after any pipeline change with `uv run python -m scripts.generate_pipeline_report` (takes well under a minute — it's scoped to one small region, not a full tile).
+**[docs/pipeline_report.md](docs/pipeline_report.md)** — a figure per pipeline stage (raw imagery → OSM mask → shadow detection → red boost → prefiltered output → CNN scan → edge tracing/regularization/bridging → width measurement → the same detection pipeline applied to road surface) on one fixed worked example, for reference in writeups. Regenerate after any pipeline change with `uv run python -m scripts.generate_pipeline_report` (takes well under a minute — it's scoped to one small region, not a full tile).
 
 ## Research Paper
 
@@ -67,7 +67,7 @@ data/
   osm/            # cached OSM query results (not in git)
   output/         # final GeoTIFFs (not in git)
   training/       # chipped YOLO dataset, generated from annotated_bike_lanes/ (not in git)
-  detections/     # detection GeoPackage + raster/PNG previews (not in git)
+  detections/     # detection GeoPackage + raster/PNG previews, incl. per-tile road runs (not in git)
 runs/             # ultralytics training output, incl. trained weights (not in git)
 ```
 
@@ -87,10 +87,13 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `detection/base.py` — the model swap point: `Detector` protocol, `Detection` type. Nothing else in the detection code depends on a specific model.
 - `detection/dataset.py` — converts CVAT YOLO-seg exports (drawn on the full 5000x5000 tiles) into a chipped, trainable YOLO dataset
 - `detection/yolo_seg_detector.py` — current adapter: loads a fine-tuned YOLO-seg checkpoint, runs inference on a chip
-- `detection/texture_detector.py` — `Detector` adapter for texture_embedding.py: sliding-window scan + discriminant scoring
-- `detection/edge_trace.py` — `Detector` adapter combining the above coarse scan with classical color-based edge tracing, for a mask precise enough to measure width from (see Width measurement below)
+- `detection/texture_detector.py` — `Detector` adapter for texture_embedding.py: sliding-window scan + discriminant scoring. One class, two configurations — `bike_lane_detector()` and `road_detector()` differ only in which reference labels they discriminate between and their thresholds
+- `detection/edge_trace.py` — `BikeLaneEdgeDetector`, the full colour-trace pipeline for lane paint (see Width measurement below), and `RoadEdgeDetector`, which is now only the thresholded CNN mask — its colour test was measured and removed (see Road detection below)
 - `detection/tiling.py` — chips a tile into windows for inference, maps masks back to tile pixel/geo coordinates
-- `detection/width.py` — skeletonize + distance transform → width stats, model-agnostic (works on any mask)
+- `detection/width.py` — `measure_width_m`: skeletonize + distance transform. Bike lanes only; it does not generalize to roads (see Road detection below)
+- `detection/centerline_width.py` — width measured by casting rays perpendicular to a known OSM centerline, the only method that survives tile scale (see Road detection below)
+- `detect_roads.py` — orchestrator for a whole-tile road run: coarse CNN scan → per-OSM-way width, writing a GeoPackage, a width-coloured map and the cached surface mask
+- `detection/ribbon_fit.py` — **parked, imported by nothing.** Joint two-edge fit against continuous imagery; the machinery works, the evidence function is biased narrow (see Road detection below)
 - `detection/rasterize.py` — burns a numeric field (score, width_mean_m, ...) from the detections into a GeoTIFF aligned to the source tile grid, plus a colorized PNG preview (raw single-band GeoTIFFs render as flat grayscale in a plain image viewer without one)
 
 ## Shadow handling
@@ -187,7 +190,7 @@ This is a data-quantity problem, not a pipeline bug: unlike the zero-shot attemp
 A third approach, alongside YOLO and the dropped classical color+shape detector: a frozen, pretrained-on-aerial-imagery CNN used purely for embedding similarity, no training at all. See `scripts/texture_embedding.py`, `scripts/detection/texture_detector.py`, `scripts/texture_analysis.py`.
 
 - **backbone** — TorchGeo's Swin V2-B, `NAIP_RGB_SI_SATLAS` weights (SatlasPretrain, pretrained on NAIP aerial RGB imagery). Picked deliberately over TorchGeo's other pretrained options (Sentinel-2 at 10 m/px, Landsat at 30 m/px) since NAIP is the closest available domain match to this project's own aerial orthophoto imagery — the others would see an entire bike lane as at most a sub-pixel smudge. Classifier head replaced with `Identity()`, keeping the 1024-dim pooled embedding.
-- **reference examples** — `data/input/textures/<label>/*.png`, one subfolder per class. Currently: `bikelane` (2 hand-picked lane-paint crops) and `negative` (road, sidewalk, and 4 rooftops — rooftops specifically needed several examples spanning different roof colors; one wasn't enough to generalize).
+- **reference examples** — `data/input/textures/<label>/*.png`, one subfolder per class. Currently: `bikelane` (2 hand-picked lane-paint crops), `negative` (road, sidewalk, and 4 rooftops — rooftops specifically needed several examples spanning different roof colors; one wasn't enough to generalize), and `road` (7 sunlit carriageway crops, added for the road detector — see Road detection). Which folders count as positive vs. negative is per-detector, set by `BIKE_LANE_TEXTURE_LABELS` / `ROAD_TEXTURE_LABELS` in `config.py`, since road is a negative when looking for lane paint and the positive when looking for road.
 - **classification: `discriminant_score`, not raw similarity** — plain nearest-neighbor cosine similarity against individual references doesn't work here: pairwise similarity between *any* two reference crops stays high (0.75–0.95) almost regardless of class, so a different-class pair can score higher than a same-class pair (`texture_analysis.py`'s report catches this directly). `discriminant_score` instead projects a candidate embedding onto the direction between the two classes' mean embeddings — still zero training, just arithmetic on frozen embeddings, but isolates the component that actually separates the classes rather than whatever's common to all pavement-like patches. See `texture_embedding.py`'s module docstring for the numbers that motivated this.
 - **orthophoto caveat** — this imagery is a *standard* orthophoto (terrain-corrected only, not a *true* ortho built from a full surface model), so tall objects like buildings show relief displacement: a rooftop's visible pixels are offset from the building's true OSM footprint, confirmed by overlaying OSM building polygons directly on the imagery. That's why rooftop confusion was fixed with more reference *pixel* examples rather than by subtracting building footprints from the mask — footprint subtraction would remove pixels at the building's true ground position while the displaced, visible rooftop pixels stayed untouched.
 
@@ -197,6 +200,7 @@ A third approach, alongside YOLO and the dropped classical color+shape detector:
 uv run python -m scripts.texture_analysis                                                      # pairwise reference-embedding similarity report
 uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <width> <height> [stride_px]      # scan + visualize one region
 uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <width> <height> [stride_px] # coarse scan + edge trace + width
+uv run python -m scripts.texture_analysis road <tile.tif> <x> <y> <width> <height> [stride_px]  # the same, for road surface
 ```
 
 The second form runs the actual sliding-window detector (`TextureEmbeddingDetector`, `TEXTURE_WINDOW_PX`/`TEXTURE_STRIDE_PX` in `config.py`, 22px/11px by default) over the given pixel window and saves `texture_scan_result.png`: raw RGB, continuous discriminant-score heatmap, and the thresholded detection mask, side by side. Slow — ~90s for an ~870x580 region on this machine's MPS backend (the backbone runs at ~28ms/image regardless of batching) — not something to run over a whole tile or all 6 tiles in one sitting.
@@ -207,7 +211,7 @@ The optional `stride_px` overrides `TEXTURE_STRIDE_PX` for that one run — smal
 
 ### Not yet done
 
-- Not wired into `detect.py` as a selectable option (still hardcodes `YoloSegDetector`).
+- Not wired into `detect.py` as a selectable option (still hardcodes `YoloSegDetector`) — this applies to the road detector too, which is currently reachable only via `scripts.texture_analysis road` and the pipeline report.
 - Never run across all 6 tiles in one go — a single full 5000x5000 tile takes on the order of 20-30 minutes at the default (highest-resolution) window/stride settings, so batch-processing all 6 wasn't attempted; validated on bounded regions, individual crops, and one full tile.
 
 `SCORE_THRESHOLD` (0.10, in `detection/texture_detector.py`) is calibrated from this session's validation crops, not guessed: every genuine lane-paint crop tested scored +0.16 to +0.25, every clean negative scored ≤ -0.10, and the one edge case (a partially-shadowed rooftop) scored +0.042 — still below the lowest lane score. 0.10 sits strictly between the highest validated negative and the lowest validated positive score, so it fixes that edge case as a side effect too. (The original default, 0.0, was too loose — the continuous heatmap cleanly traced real lane paint, but the thresholded mask also picked up a lot of plain street, since much of it still scored weakly positive.)
@@ -225,6 +229,122 @@ One real width measurement isn't one pixel-blob: the traced mask is split into c
 **Bridging.** A stretch with zero color-threshold hits at all (a parked car, deep tree shadow) has no pixels to bin — a real gap between components, not a shape defect regularization can smooth away, even though a real lane doesn't actually stop there. So after regularizing each component separately, `BikeLaneEdgeDetector.predict` reconnects them: any two components whose nearest endpoints are both close *and* already heading straight at each other (`BRIDGE_MAX_GAP_RADIUS_MULTIPLE=4.0`, `BRIDGE_ALIGNMENT_COS_MIN=0.82` ≈ 35°) get a straight bridge drawn between them at the narrower segment's width; components joined by a bridge merge back into one `Detection`. The direction check is what makes it safe to be generous with distance — it's what tells a lane continuing past an occluding car apart from an unrelated red feature that just happens to sit nearby.
 
 Tested on a real cycle-track crop: before any of this, a single segment's width came out at a noisy 0.40–6.66m spread, and the raw traced mask was visibly blobby and fragmented into 3–5 disconnected pieces (a parked car, tree shadow gaps). After regularization + bridging: **one continuous segment**, 677 width samples along it, mean 2.81m / median 2.80m with a tight 2.04–3.60m spread — matching a plausible raised cycle track, visibly a single smooth constant-width band running the crop's full length in the output PNG, including straight through where two parked cars occlude the paint. A couple of small (<350px) unbridged fragments remained near the cars — short/isolated enough that they didn't meet the alignment or distance bar, and no further tuning was attempted on that.
+
+## Road detection
+
+Road detection is **not** the bike-lane pipeline with the labels swapped. It was built that way first, and the pixel-precise half was then removed after being measured. What remains is deliberately much smaller:
+
+- **`road_detector()`** — the texture CNN at `ROAD_SCORE_THRESHOLD` (0.18), producing a mask stamped in 22 px scan-window blocks. This is the whole of the surface detection.
+- **`detection/centerline_width.py`** — width measured by casting rays perpendicular to OSM road centerlines, against that mask.
+
+**Why the colour test was removed.** An asphalt colour test (`hue_distance_from_red >= 0.25 & saturation <= 0.25`) used to refine the coarse mask, followed by a morphological closing and a small-component filter. Accounting for each step on the representative frame:
+
+| step | pixels | change | components |
+|---|---|---|---|
+| coarse CNN mask | 84,579 | | 4 |
+| `binary_dilation`, 8 px | 109,526 | +24,947 | 1 |
+| asphalt colour test | 36,437 | **−73,089** | 138 |
+| `closing(disk(2))` | 37,877 | +1,440 | 54 |
+| drop components ≤200 px | 36,961 | −916 | 6 |
+
+The colour test discarded two thirds of its own region of interest and shattered the rest into 138 fragments; the morphology after it existed only to make that usable again. Every one of those steps moves the boundary a width is measured from. Bike-lane paint has a strong colour cue so a colour test genuinely localizes it — road surface does not, and there the test was mostly discarding real road.
+
+`ROAD_SCORE_THRESHOLD` was raised 0.14 → 0.18 to compensate. 0.14 was Youden's J optimum, but J weighs recall and false positives equally and they are not equally costly here: with nothing refining the mask downstream, anything wrongly included goes straight into the surface. 0.18 cuts the false-positive rate 33.7% → 15.1% for 72.7% → 48.1% recall. A missing road is a visible coverage gap; an invented one is not.
+
+Everything below was measured on the same representative frame the rest of this document uses (tile 404_5757, x=4300 y=1330 w=750 h=180), scored against the prefiltered tile's own classification band as ground truth — carriageway (class 2) as positive, bike-lane buffer (class 1) as negative.
+
+**The width measurement works; the coarse localization is much weaker than the bike-lane equivalent.** That weakness is a property of the signal, not of the implementation: bike-lane paint has a strong color cue, road has only texture, and almost everything inside the prefiltered buffer is pavement of some kind.
+
+- **Coarse discriminant** — carriageway pixels score a median +0.177 against +0.114 for the bike-lane buffer: overlapping distributions, not separated ones. Sweeping the threshold, Youden's J peaks at 0.14 (72.7% of carriageway retained, 33.7% of bike-lane buffer wrongly retained). J = 0.39, where the bike-lane discriminant reaches 0.73 at its own shipped threshold on the same frame. So the coarse road mask covers about two thirds of this frame, including the parking area and sidewalk, and is only ever used to bound a region of interest — never as a decision on its own.
+- **Asphalt trace** — 82% recall at 32% false-positive rate on sunlit pixels. The FPR is far worse than the bike-lane tracer's ~0.8%, partly genuinely (gray is a weak signal) and partly by measurement: the "negative" class here is the bike-lane *buffer*, which in this frame overlaps real carriageway and covers an asphalt cycle path, so some of what counts against it is asphalt correctly identified as asphalt.
+
+**Deep shadow is not recoverable, and is excluded deliberately rather than missed.** Shadowed carriageway and shadowed non-carriageway are statistically indistinguishable in this imagery: median hue distance from red 0.405 vs 0.405, median saturation 0.506 vs 0.519, mean RGB (44,60,81) vs (41,57,79). Embedding them and fitting a discriminant on the same pixels it is then scored on — an optimistic upper bound — still misclassifies 35%, against 20% for the equivalent sunlit comparison. Shadowed pavement is lit by blue skylight and so reads strongly saturated, which means the saturation ceiling rejects it as a side effect; that is left as-is. A darker or looser branch added to recover the shadowed carriageway would admit the shadowed sidewalk beside it in equal measure, fabricating coverage rather than measuring it. This is also why the `road` reference folder contains only sunlit crops: including shadowed ones as positives, with no shadowed negatives to balance them, would have made brightness the dominant axis of the discriminant.
+
+### Width methods tried and dropped
+
+Three ways of measuring road width from the *shape of a mask* were built and discarded before the centerline method below. The findings are kept because each one rules something out:
+
+- **Medial axis** (`measure_width_m`, still used for bike lanes). A distance transform measures the distance to the nearest edge of any kind, including the edges of interior holes, and a traced road is full of them. On the largest carriageway component it returned a 4.0 px radius where the true maximum inscribed radius was 27.3 px. `binary_fill_holes` was tried as a cheap fix and did essentially nothing (1.60 m → 1.74 m): the interruptions are open indentations connected to the exterior, not enclosed islands.
+- **Constant-width band** (`_regularize_band` + bridging, the bike-lane back half). Produced 1.1–4.7 m on a carriageway plainly 12 m across — a road reduced to a thin line. A lane holds one width along its length; a road does not.
+- **PCA cross-track extent, split by width run.** This one worked on a single isolated frame (carriageway 12.03 m over 119 cross-sections) and failed completely at tile scale, because pavement connects into networks: a T-junction has no dominant axis, so PCA returns something diagonal and the width is measured across the junction. On one 300×300 m region it reported a 28 m road (a junction) and a 55 m road (a car park).
+
+**Intersecting the coarse mask with the OSM street class was also tried and rejected.** It removes the car-park false positives, but `STREET_BUFFER_METERS` is 6.0, so the buffer is 12 m wide and *clips the carriageway* — measured widths dropped to 7.57–8.59 m. The number reported would be the buffer's width rather than anything measured from the imagery. For a detector whose output is a width, constraining the region by an assumed width defeats the purpose.
+
+**A ribbon fit is parked, not abandoned** (`detection/ribbon_fit.py`, wired into nothing). It fits both edges jointly along a whole way by dynamic programming against continuous imagery, never binarising — the right shape of answer, and it fixed three real bugs on the way. Its evidence function is biased narrow (median 5.35 m where these streets run ~9 m) because "road-like" is defined by similarity to a reference sampled at the centerline, so similarity declines monotonically outward. The module docstring records the state and the two candidate fixes. One hypothesis was tested and **disproven**: that the prefilter's buffer masking was the limiter — running against raw unmasked `.jp2` imagery gave an identical 5.35 m.
+
+### Tile scale needs the centerline, not the mask's own shape
+
+Everything above measures a road's width from the shape of the traced mask itself. That holds on one hand-picked frame and **stops holding as soon as the extent contains a junction**, which at tile scale is immediately.
+
+Every method above infers a direction from the mask itself — a medial axis, or PCA on the pixel coordinates. A T-junction has no dominant axis, so PCA returns something diagonal and the width that follows is measured across the junction rather than across either road. Run on one 300×300 m region, the mask-shape method reported a 28 m road (a T-junction) and a 55 m road (a car park).
+
+`detection/centerline_width.py` takes the direction from OSM's road centerlines instead, which the pipeline already fetches and caches. For each point sampled along a way, the local tangent gives a perpendicular, and the width is how far the traced asphalt actually extends along it in each direction. Three things fall out of that at once:
+
+- junctions stop mattering, because each OSM way is measured as its own unit regardless of what it touches
+- surfaces with no centerline are never measured, which is what finally excludes the parking lots the coarse texture discriminant cannot reject
+- results are keyed to OSM ways, so a width joins straight back to that way's tags
+
+**This is not the buffer-as-ROI idea rejected above.** The buffer is not the measurement — the ray stops where the traced asphalt stops. The buffer only bounds how far a ray can possibly travel, since the prefiltered imagery is masked to it, and `buffer_limited_fraction` records any sample that ran into that edge so a clipped measurement stays visible rather than silently reading as a narrow road.
+
+**Two flags do the honest work here, and both are load-bearing:**
+
+- `buffer_limited_fraction` — the sample hit masked-out background, so the road may be wider than reported.
+- `unbounded_fraction` — the ray traveled the full 15 m cap without ever finding an edge, so the width for that sample is a lower bound reported at the cap rather than an observed measurement. Both are per-way statistics on the measurement itself; neither is used to classify a way as anything.
+
+### Result on a full tile
+
+One complete 5000×5000 tile (`404_5757`, 1 km²), default stride, 23 minutes for the coarse scan:
+
+| | |
+|---|---|
+| coarse road mask | 13% of the tile |
+| traced asphalt surface | 1,864,726 px (7% of the tile) |
+| OSM street ways crossing the tile | 173 |
+Run twice, before and after the colour test was removed. The comparison is the useful part:
+
+| | thr 0.14 + colour test | **thr 0.18, CNN only** |
+|---|---|---|
+| coarse mask | 13% of tile | **8%** |
+| traced surface | 1,864,726 px | **2,108,062 px** |
+| ways with ≥3 cross-sections (of 173) | 113 | **101** |
+| median width | 9.20 m | **11.10 m** |
+| p10–p90 | 6.42–14.54 m | **6.00–17.80 m** |
+| samples stopped by the buffer edge | 1.3% | **0.9%** |
+| mean `unbounded_fraction` | — | **16.9%** |
+
+Two things worth reading carefully.
+
+**The mask got stricter and the surface got bigger** — 13% → 8% coarse, but 1.86M → 2.11M px of surface. That is the colour test's cost stated in one line: it was discarding more than the stricter threshold ever did.
+
+**The widths got worse, not better.** They are systematically ~2 m wider, with the upper tail moving much further (p90 14.54 → 17.80 m), and 11.10 m is too wide for a median German urban street where 9.20 m was already plausible. The mechanism is the quantisation this run accepted: the CNN mask is stamped in 22 px blocks, so its boundary overshoots the true road edge by up to half a block on each side, and a ray casting against it stops late. Neither figure is validated against ground truth, so the honest claim is directional rather than absolute — but the bias has a known sign, and it is up.
+
+Coverage also fell (113 → 101 ways), which is the stricter threshold behaving as intended.
+
+Buffer clipping is negligible in both runs, so `STREET_BUFFER_METERS` is not meaningfully constraining the measurement at these widths.
+
+**The 35% of ways with no measurement is the real coverage limit**, and it is mostly the shadow problem: a way with fewer than 3 measurable cross-sections is one whose road surface was not traced under it, and deep shadow is where the asphalt test cannot work at all (see above). This is a coverage gap rather than a wrong number — those ways are absent from the output, not present with a bad width.
+
+### Running it on a tile
+
+```bash
+uv run python -m scripts.detect_roads data/output/foo.tif             # whole tile, ~35 min
+uv run python -m scripts.detect_roads data/output/foo.tif 22          # coarser scan, ~4x faster
+uv run python -m scripts.detect_roads data/output/foo.tif 11 0 0 1500 1500   # one window
+```
+
+Writes three things to `data/detections/`:
+
+- `<tile>_roads.gpkg` — one row per OSM way: `width_median_m` / `mean` / `min` / `max`, `n_samples`, `buffer_limited_fraction`, `unbounded_fraction`
+- `<tile>_roads_width.png` — every measured way drawn over the imagery, colored by median width (4 m blue → 20 m red). This is the one to look at: a road reading 20 m stands out against its neighbors at a glance, where a table of 100 rows hides it
+- `<tile>_roads_surface.png` and `.npz` — the traced surface as an overlay, and as a mask. The scan is the expensive part by far, so keeping it means a different overlay or a re-run of the width measurement doesn't mean paying for it again
+
+This deliberately does **not** reuse `detect.py`'s chip loop. `iter_chips` cuts a tile into 640 px squares and runs the detector on each independently, which is fine for a model that decides per chip. 640 px is 128 m — short enough that chip boundaries would slice most roads into pieces, each measured as if it were a separate road. The coarse scan and the trace both run against the full extent in one pass; only the sliding scan window is chunked, by batch, inside the detector. The cost of that is time, not memory — a full tile's masks are a few hundred MB, while the scan is on the order of half an hour at the default stride, scaling with 1/stride².
+
+### Remaining known problem
+
+The coarse discriminant is still too weak to tell carriageway from other large paved surfaces on texture alone. The centerline method routes around that for *measurement* — nothing without an OSM centerline under it is ever measured — but the underlying discriminant is unchanged, and the traced surface mask itself still covers pavement that is not road. Anything that consumes the mask rather than the per-way widths inherits that.
+
+The widths themselves are also only as good as the traced surface they are measured against, and that surface comes from a colour threshold plus morphological cleanup. Where a way's `unbounded_fraction` is high, the ray never found an edge and the width is a lower bound, not a measurement.
 
 ## Known limitations
 

@@ -1,5 +1,24 @@
 """Precise bike-lane masks: CNN coarse localization, then classical color edge tracing.
 
+Two detectors live here, and they are no longer variations on one another.
+
+`BikeLaneEdgeDetector` is the full pipeline this module was built for:
+coarse CNN region, pixel-precise color threshold inside it, per-component
+shape regularization, directional bridging.
+
+`RoadEdgeDetector` is now only the coarse CNN mask. Its color test and the
+morphology serving it were removed after being measured: on the
+representative frame the asphalt color test discarded two thirds of its own
+region of interest (109,526 px -> 36,437 px) and left 138 fragments, and
+every cleanup step after it moved the boundary that a width gets measured
+from. What replaced it is a stricter CNN threshold and no per-pixel step at
+all -- see `RoadEdgeDetector`. Road width is measured separately, from OSM
+centerlines, in detection/centerline_width.py.
+
+That asymmetry is deliberate and worth stating: bike-lane paint has a strong
+color cue, so a color test genuinely localizes it. Road surface does not,
+so a color test there was mostly discarding real road.
+
 texture_detector.TextureEmbeddingDetector answers "is there bike-lane paint
 somewhere in this window" -- useful for finding lanes, but its mask is
 stamped in TEXTURE_WINDOW_PX blocks (22px = 4.4m at this imagery's 0.2m/px), well
@@ -72,6 +91,7 @@ that neighboring surface low (~0.8%) -- see scratchpad calibrate_sweep.py in
 that session for the swept table, not preserved in this repo.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -81,7 +101,7 @@ from skimage.draw import line as draw_line
 from skimage.morphology import closing, disk, remove_small_objects
 
 from scripts.detection.base import Detection
-from scripts.detection.texture_detector import TextureEmbeddingDetector
+from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
 
 # Hue distance (circular, in [0, 0.5]) from pure red (hue=0) that still
 # counts as lane/path paint -- looser than redness.py's RED_HUE_TOLERANCE
@@ -158,6 +178,12 @@ BRIDGE_ALIGNMENT_COS_MIN = 0.82
 # centerline doesn't dominate the estimate.
 BRIDGE_TANGENT_LOOKBACK_POINTS = 5
 
+
+# A road is an order of magnitude wider than a lane (~6-7 m of carriageway
+# vs ~2 m), so the "too small to be real" floor scales with it: 200 px at
+# 0.2 m/px is 8 m^2, about the footprint of a single car, below which a
+# fragment isn't a stretch of carriageway.
+ROAD_MIN_COMPONENT_AREA_PX = 200
 
 def _paint_mask(image: np.ndarray, roi: np.ndarray) -> np.ndarray:
     """Pixel-precise "is this bike-lane paint" mask within `roi`, by color alone."""
@@ -282,6 +308,36 @@ def _bridge(segment_a: Segment, segment_b: Segment, shape: tuple[int, int]) -> n
     return None
 
 
+def _traced_components(
+    image: np.ndarray,
+    coarse: list[Detection],
+    surface_mask: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    min_component_area_px: int,
+) -> list[np.ndarray]:
+    """Find one surface inside a coarse detection's region, as connected components.
+
+    Grow the coarse mask into a region of interest, keep the pixels inside
+    it that pass `surface_mask`'s color test, close small gaps, drop specks.
+
+    Only the bike-lane detector uses this now; `surface_mask` is kept as a
+    parameter rather than inlined because it is the one part that knows what
+    is being looked for, and that separation is what made it possible to
+    measure the road color test's cost and then remove it.
+    """
+    roi = binary_dilation(coarse[0].mask, iterations=ROI_DILATION_PX)
+    mask = surface_mask(image, roi)
+    if not mask.any():
+        return []
+
+    mask = closing(mask, disk(CLOSING_RADIUS_PX))
+    mask = remove_small_objects(mask, max_size=min_component_area_px)
+    if not mask.any():
+        return []
+
+    labeled, n_components = label(mask)
+    return [labeled == component_id for component_id in range(1, n_components + 1)]
+
+
 class BikeLaneEdgeDetector:
     """Detector (see detection/base.py) combining CNN coarse localization with
     classical color-based edge tracing for a mask precise enough to measure
@@ -289,7 +345,7 @@ class BikeLaneEdgeDetector:
     """
 
     def __init__(self, coarse_detector: TextureEmbeddingDetector | None = None):
-        self._coarse = coarse_detector or TextureEmbeddingDetector()
+        self._coarse = coarse_detector or bike_lane_detector()
 
     def predict(self, image: np.ndarray, coarse: list[Detection] | None = None) -> list[Detection]:
         """`coarse` lets a caller that already ran (or otherwise obtained) the
@@ -302,23 +358,12 @@ class BikeLaneEdgeDetector:
         if not coarse:
             return []
 
-        roi = binary_dilation(coarse[0].mask, iterations=ROI_DILATION_PX)
-        mask = _paint_mask(image, roi)
-        if not mask.any():
-            return []
-
-        mask = closing(mask, disk(CLOSING_RADIUS_PX))
-        mask = remove_small_objects(mask, max_size=MIN_COMPONENT_AREA_PX)
-        if not mask.any():
-            return []
-
-        # Split into connected components and regularize each separately
-        # (see _regularize_band) -- components too small/blob-like to have a
-        # real centerline are dropped rather than kept as noise.
-        labeled, n_components = label(mask)
+        # Regularize each component separately (see _regularize_band) --
+        # components too small/blob-like to have a real centerline are
+        # dropped rather than kept as noise.
         segments = []
-        for component_id in range(1, n_components + 1):
-            segment = _regularize_band(labeled == component_id)
+        for component in _traced_components(image, coarse, _paint_mask, MIN_COMPONENT_AREA_PX):
+            segment = _regularize_band(component)
             if segment is not None:
                 segments.append(segment)
         if not segments:
@@ -344,3 +389,62 @@ class BikeLaneEdgeDetector:
             Detection(mask=labeled_final == component_id, score=coarse[0].score, label="bikelane_edge")
             for component_id in range(1, n_final + 1)
         ]
+
+
+class RoadEdgeDetector:
+    """Detector (see detection/base.py) for road surface: the CNN mask, and nothing else.
+
+    The colour test this used to run inside the coarse region is gone. It
+    was the single most destructive step in the chain -- on the
+    representative frame it discarded two thirds of the region of interest
+    (109,526 px -> 36,437 px) and shattered what survived into 138
+    fragments, which then needed a morphological closing and a
+    small-component filter to be usable at all. Every one of those steps
+    moved the surface boundary, and the boundary is what a width is measured
+    from.
+
+    So the surface is now the thresholded CNN mask directly, at a stricter
+    threshold to compensate for no longer being refined downstream (see
+    ROAD_SCORE_THRESHOLD). The dilation went with the colour test, since it
+    existed only to widen the region that test searched -- keeping it would
+    now just inflate every road by 8 px on each side. The closing went too:
+    the CNN mask is stamped in whole windows and is not speckled the way a
+    per-pixel colour threshold is.
+
+    What this mask cannot do is locate an edge precisely: it is stamped in
+    TEXTURE_WINDOW_PX blocks, so its resolution is 4.4 m at this imagery's
+    scale, and its score ramps over ~5 m across a real road edge rather than
+    stepping at it. It answers "is there road here", not "where does it
+    end". Width comes from detection/ribbon_fit.py, which fits the edges
+    against the continuous imagery instead.
+    """
+
+    def __init__(self, coarse_detector: TextureEmbeddingDetector | None = None):
+        self._coarse = coarse_detector or road_detector()
+
+    def predict(self, image: np.ndarray, coarse: list[Detection] | None = None) -> list[Detection]:
+        """One Detection per connected component of the road surface."""
+        mask = self.surface_mask(image, coarse)
+        if not mask.any():
+            return []
+        score = coarse[0].score if coarse else 0.0
+        labeled, n_components = label(mask)
+        return [
+            Detection(mask=labeled == component_id, score=score, label="road")
+            for component_id in range(1, n_components + 1)
+        ]
+
+    def surface_mask(self, image: np.ndarray, coarse: list[Detection] | None = None) -> np.ndarray:
+        """The road surface: the thresholded CNN mask, with isolated specks dropped.
+
+        The small-component filter is the one piece of cleanup kept, and it
+        is close to a no-op by design -- ROAD_MIN_COMPONENT_AREA_PX (200 px)
+        is well under a single scan window's 484 px footprint, so it only
+        removes fragments left where a window was clipped by the tile edge
+        or by the prefilter's own mask.
+        """
+        if coarse is None:
+            coarse = self._coarse.predict(image)
+        if not coarse:
+            return np.zeros(image.shape[:2], dtype=bool)
+        return remove_small_objects(coarse[0].mask.copy(), max_size=ROAD_MIN_COMPONENT_AREA_PX)

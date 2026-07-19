@@ -7,7 +7,7 @@ pipeline change with:*
 uv run python -m scripts.generate_pipeline_report
 ```
 
-*Generated 2026-07-19 09:16 UTC from commit `20d4148`.*
+*Generated 2026-07-19 19:42 UTC from commit `6a46cbb`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -90,8 +90,35 @@ Every stage below runs on the same fixed example region:
   (`scripts/detection/width.py`)
 - **Input:** the final regularized mask from step 7
 
-| segment | px     | mean (m) | median (m) | min (m) | max (m) | n samples |
-| ------- | ------ | -------- | ---------- | ------- | ------- | --------- |
-| 0       | 10,005 | 2.81     | 2.80       | 2.04    | 3.60    | 677       |
-| 1       | 327    | 1.60     | 1.60       | 1.26    | 1.65    | 36        |
-| 2       | 105    | 1.17     | 1.20       | 0.89    | 1.20    | 16        |
+| segment | px | mean (m) | median (m) | min (m) | max (m) | n samples |
+|---|---|---|---|---|---|---|
+| 0 | 10,005 | 2.81 | 2.80 | 2.04 | 3.60 | 677 |
+| 1 | 327 | 1.60 | 1.60 | 1.26 | 1.65 | 36 |
+| 2 | 105 | 1.17 | 1.20 | 0.89 | 1.20 | 16 |
+
+## 9. Road surface
+
+- **Detector:** `road_detector()` + `RoadEdgeDetector` -- the CNN discriminant at
+  `ROAD_SCORE_THRESHOLD` (0.18) and nothing else
+- **Left:** RGB
+- **Middle / right:** *identical* on this frame, and that is the point. The road pipeline no longer
+  has a pixel-precise stage: the middle panel is the coarse mask, the right one is the same mask with
+  isolated specks dropped, and here nothing was small enough to drop -- 57,596 px in both
+
+![road surface](figures/09_road_trace.png)
+
+Note the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows, so
+its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
+directly, and it is why widths measured against this surface come out biased wide.
+
+**Surface found on this frame:** 57,596 px across 10 component(s).
+
+**No width table here, deliberately.** This mask is stamped in `TEXTURE_WINDOW_PX` blocks, so its
+resolution is 4.4 m, and its score ramps over ~5 m across a real road edge rather than stepping at
+it. It answers "is there road here", not "where does it end", and any width read off its shape would
+be measuring the scan grid. Road widths are measured from OSM centerlines by
+`scripts.detect_roads` -- see "Road detection" in `README.md`.
+
+The colour test and morphology that used to sit here were removed after being measured: the colour
+test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
+step after it moved the boundary a width would be taken from.

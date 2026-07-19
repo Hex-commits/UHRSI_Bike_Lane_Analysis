@@ -25,7 +25,7 @@ from PIL import Image
 from rasterio.windows import Window
 
 from scripts.config import INPUT_TILES_DIR, OUTPUT_DIR
-from scripts.detection.texture_detector import TextureEmbeddingDetector
+from scripts.detection.texture_detector import bike_lane_detector, road_detector
 from scripts.detection.width import measure_width_m
 from scripts.texture_analysis import visualize_edge_trace, visualize_scan
 
@@ -96,7 +96,7 @@ def main() -> None:
     _save_png(prefiltered_rgb, FIGURES_DIR / "05_prefiltered.png")
 
     # 6. texture-embedding CNN coarse scan
-    coarse_detector = TextureEmbeddingDetector()
+    coarse_detector = bike_lane_detector()
     visualize_scan(OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "06_cnn_scan.png", detector=coarse_detector)
 
     # 7. edge tracing + shape regularization + bridging (reuses the scan above)
@@ -105,17 +105,29 @@ def main() -> None:
     )
 
     # 8. width measurement, per final segment
-    width_rows = []
-    for i, detection in enumerate(sorted(edge_detections, key=lambda d: -d.mask.sum())):
-        stats = measure_width_m(detection.mask, pixel_size_m)
-        if stats:
-            width_rows.append((i, int(detection.mask.sum()), stats))
+    width_rows = _width_rows(edge_detections, pixel_size_m)
 
-    _write_report(width_rows)
+    # 9. the same two stages again for road surface, not bike-lane paint
+    road_coarse = road_detector()
+    road_detections = visualize_edge_trace(
+        OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "09_road_trace.png", coarse_detector=road_coarse, surface="road"
+    )
+    road_surface_px = int(sum(d.mask.sum() for d in road_detections))
+
+    _write_report(width_rows, road_surface_px, len(road_detections))
     print(f"Wrote {REPORT_PATH} and {len(list(FIGURES_DIR.glob('*.png')))} figures in {FIGURES_DIR}")
 
 
-def _write_report(width_rows: list[tuple[int, int, "object"]]) -> None:
+def _width_rows(detections: list, pixel_size_m: float) -> list[tuple[int, int, "object"]]:
+    rows = []
+    for i, detection in enumerate(sorted(detections, key=lambda d: -d.mask.sum())):
+        stats = measure_width_m(detection.mask, pixel_size_m)
+        if stats:
+            rows.append((i, int(detection.mask.sum()), stats))
+    return rows
+
+
+def _write_report(width_rows: list[tuple[int, int, "object"]], road_surface_px: int, road_components: int) -> None:
     width_table_rows = "\n".join(
         f"| {i} | {px:,} | {stats.mean_m:.2f} | {stats.median_m:.2f} | {stats.min_m:.2f} | {stats.max_m:.2f} | {stats.n_samples} |"
         for i, px, stats in width_rows
@@ -215,6 +227,33 @@ Every stage below runs on the same fixed example region:
 | segment | px | mean (m) | median (m) | min (m) | max (m) | n samples |
 |---|---|---|---|---|---|---|
 {width_table_rows}
+
+## 9. Road surface
+
+- **Detector:** `road_detector()` + `RoadEdgeDetector` -- the CNN discriminant at
+  `ROAD_SCORE_THRESHOLD` (0.18) and nothing else
+- **Left:** RGB
+- **Middle / right:** *identical* on this frame, and that is the point. The road pipeline no longer
+  has a pixel-precise stage: the middle panel is the coarse mask, the right one is the same mask with
+  isolated specks dropped, and here nothing was small enough to drop -- 57,596 px in both
+
+![road surface](figures/09_road_trace.png)
+
+Note the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows, so
+its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
+directly, and it is why widths measured against this surface come out biased wide.
+
+**Surface found on this frame:** {road_surface_px:,} px across {road_components} component(s).
+
+**No width table here, deliberately.** This mask is stamped in `TEXTURE_WINDOW_PX` blocks, so its
+resolution is 4.4 m, and its score ramps over ~5 m across a real road edge rather than stepping at
+it. It answers "is there road here", not "where does it end", and any width read off its shape would
+be measuring the scan grid. Road widths are measured from OSM centerlines by
+`scripts.detect_roads` -- see "Road detection" in `README.md`.
+
+The colour test and morphology that used to sit here were removed after being measured: the colour
+test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
+step after it moved the boundary a width would be taken from.
 """
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(content)

@@ -8,8 +8,10 @@ INPUT_TILES_DIR = PROJECT_ROOT / "data" / "input" / "idop_kacheln"
 OSM_CACHE_PATH = PROJECT_ROOT / "data" / "osm" / "osm_features.gpkg"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 
-# Reference crops for scripts/texture_embedding.py, one subfolder per label
-# (e.g. "bikelane", "negative").
+# Reference crops for scripts/texture_embedding.py, one subfolder per
+# *surface*: "bikelane", "road", "sidewalk", "rooftop". Named per surface
+# rather than positive/negative because which one is the positive depends on
+# the detector -- see *_TEXTURE_LABELS below.
 TEXTURES_DIR = PROJECT_ROOT / "data" / "input" / "textures"
 
 # The IDOP20 tiles are delivered as ETRS89 / UTM zone 32N.
@@ -148,6 +150,31 @@ DETECTION_RASTER_FIELDS = ["score", "width_mean_m"]
 # window and measurably hurt classification quality despite needing less
 # upsampling to the model's fixed 256px input.
 TEXTURE_WINDOW_PX = 22
+
+# Which reference surfaces each texture detector discriminates between, as
+# (positive_label, negative_labels).
+#
+# "negative" is the bike-lane detector's original six-crop negative set (one
+# road, one sidewalk, four rooftops) and is deliberately left exactly as it
+# was: SCORE_THRESHOLD in detection/texture_detector.py is calibrated
+# against it, and folding the newer road/ crops in as extra bike-lane
+# negatives was tried and reverted -- it shifted the whole bike-lane score
+# distribution down by ~0.16, far enough that the calibrated threshold
+# stopped firing at all and would have needed re-deriving to a negative
+# value. Road detection is an addition here, not a reason to recalibrate a
+# working detector.
+#
+# The road detector therefore reuses that same set as negatives, plus
+# bikelane. It contains one road crop (negative/road.png, the same image as
+# road/asphalt_1.png) which is thus on both sides of the road discriminant.
+# That was checked rather than assumed, and it turns out to *help*: removing
+# it costs 0.033 of Youden's J on the representative frame (0.391 -> 0.357).
+# Pooling one road crop into the negative mean evidently pulls that mean
+# towards pavement-in-general, which sharpens the road-specific component
+# the discriminant is left to isolate, the same effect that motivated
+# discriminant_score over raw similarity in the first place. So it stays.
+BIKE_LANE_TEXTURE_LABELS = ("bikelane", ("negative",))
+ROAD_TEXTURE_LABELS = ("road", ("bikelane", "negative"))
 
 # Step size, in pixels, between successive scan windows -- this is what
 # actually controls the *resolution* of the resulting score map/heatmap:
