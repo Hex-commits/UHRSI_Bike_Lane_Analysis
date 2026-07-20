@@ -83,7 +83,7 @@ def render_preview_png(
     normalized = np.clip((data - vmin) / max(vmax - vmin, 1e-6), 0, 1)
 
     rgba = (colormaps[cmap](normalized) * 255).astype(np.uint8)
-    rgba[..., 3] = np.where(valid, 255, 0)  # transparent where nodata
+    rgba[..., 3] = np.where(valid, 255, 0)
 
     out_png_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgba, mode="RGBA").save(out_png_path)

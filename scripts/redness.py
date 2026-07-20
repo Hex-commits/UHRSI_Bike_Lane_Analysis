@@ -1,32 +1,21 @@
 """Boost saturation of reddish pixels, so painted bike-lane paint stands out more.
 
-Works in HSV: pixels whose hue is close to red *and* already have some
-minimum saturation get their saturation multiplied up (clamped to 1.0);
-everything else -- gray asphalt, vegetation, low-saturation noise where hue
-is undefined/meaningless -- is left alone. This is deliberately narrower
-than a generic contrast stretch (tried and reverted earlier): it only
-touches pixels that already read as red, rather than stretching the whole
-tile's dynamic range and risking new artifacts everywhere.
-
-Hue tolerance and the saturation floor are calibrated against the one
-hand-annotated instance in this repo: paint pixels there sit at hue
-~0.025-0.046 (9-17 degrees) and saturation ~0.11-0.30, clearly within the
-ranges used below.
+Works in HSV: pixels close to red hue *and* already above a minimum saturation
+get their saturation multiplied up (clamped to 1.0); everything else (asphalt,
+vegetation, low-saturation noise) is left alone. Deliberately narrower than a
+generic contrast stretch (tried and reverted) -- it only touches pixels that
+already read as red, rather than stretching the whole tile's dynamic range.
+Hue tolerance and saturation floor are calibrated against this repo's one
+hand-annotated instance (paint at hue ~0.025-0.046, saturation ~0.11-0.30).
 """
 
 import numpy as np
 from skimage.color import hsv2rgb, rgb2hsv
 
-# Hue distance (circular, in [0, 0.5]) from pure red (hue=0) that still
-# counts as the bike-lane paint's color. ~29 degrees, a generous margin
-# around the calibrated 9-17 degree range.
 RED_HUE_TOLERANCE = 0.08
 
-# Below this saturation, hue is noisy/near-meaningless (close to gray) --
-# excluded so boosting doesn't amplify color noise in neutral pavement.
 MIN_SATURATION_FOR_BOOST = 0.05
 
-# Multiplier applied to saturation for qualifying pixels, clamped to 1.0.
 SATURATION_BOOST = 1.8
 
 

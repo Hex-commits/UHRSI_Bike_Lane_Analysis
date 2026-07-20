@@ -14,9 +14,9 @@ from shapely.ops import unary_union
 
 @dataclass
 class Chip:
-    image: np.ndarray  # (H, W, 3) uint8 RGB
+    image: np.ndarray
     window: Window
-    transform: Affine  # georeferenced transform for this chip, in the tile's CRS
+    transform: Affine
 
 
 def iter_chips(src: rasterio.DatasetReader, chip_size_px: int, overlap_px: int):

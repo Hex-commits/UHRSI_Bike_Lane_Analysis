@@ -4,27 +4,19 @@
     uv run python -m scripts.detect_roads data/output/foo.tif 22          # whole tile, coarser scan
     uv run python -m scripts.detect_roads data/output/foo.tif 11 0 0 1500 1500   # one window
 
-Writes a GeoPackage of per-OSM-way road widths, a width-colored map of them
-over the imagery, and the traced surface as both an overlay and a mask.
+Writes a GeoPackage of per-OSM-way road widths, a width-colored map over the
+imagery, and the traced surface as both an overlay and a mask. Width is
+measured along OSM centerlines, not the traced mask's shape (see
+detection/centerline_width.py for why nothing mask-derived survives a junction).
 
-Width is measured along OSM centerlines rather than from the traced mask's
-own shape -- see detection/centerline_width.py for why nothing derived from
-the mask's shape survives a junction.
-
-Why this doesn't reuse detect.py's chip loop: `iter_chips` cuts the tile
-into 640 px squares and runs the detector on each independently, which is
-fine for a model that decides per chip, but wrong here. A 640 px chip is
-128 m, so chip boundaries would cut both the traced surface and the OSM ways
-crossing them, and a way clipped into pieces would be measured several times
-over from too few samples each. So the coarse CNN scan, the trace and the
-measurement all run against the full extent in one pass; only the sliding
-scan window is chunked, by batch, inside the detector.
-
-The cost of that is time, not memory: the scan is the expensive stage by far
-(a 5000x5000 tile took 23 min at the default stride, scaling with
-1/stride^2), while a full tile's worth of masks is a few hundred MB. The
-surface mask is cached alongside the results so that re-rendering an overlay
-or re-running the measurement doesn't mean paying for the scan again.
+Unlike detect.py's chip loop, the scan, trace and measurement all run against
+the full extent in one pass: a 640 px chip is 128 m, so chip boundaries would
+cut the surface and the OSM ways crossing them, and a clipped way would be
+measured several times from too few samples each. Only the sliding scan window
+is chunked, by batch, inside the detector. The cost is time not memory -- the
+scan dominates (a 5000x5000 tile took 23 min at the default stride, ~1/stride^2)
+so the surface mask is cached alongside the results, letting a re-render or
+re-measure skip the scan.
 """
 
 import sys
@@ -48,25 +40,12 @@ from scripts.texture_analysis import SEGMENT_COLORS
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "detections"
 
-# Band index of the prefiltered tile's shadow mask (see "Output format" in
-# README). Shadowed pixels are cut from the road surface -- the detector
-# cannot classify them (see RoadEdgeDetector.surface_mask).
 SHADOW_BAND = 6
 
-# Long side of the overlay PNG. A 5000x5000 overlay at full resolution is a
-# ~75 MB image that no viewer opens comfortably, and roads are wide enough
-# to stay legible when downsampled this far.
 PREVIEW_MAX_PX = 2500
 
-# A way needs at least this many measurable cross-sections to be reported.
-# At SAMPLE_INTERVAL_M that's 15 m of road actually detected under it --
-# below that the median is being taken over too few samples to mean much,
-# and it's usually a way that only clips the corner of the extent.
 MIN_SAMPLES_PER_WAY = 3
 
-# Width-to-color range for the map rendered by `render_width_map`. Spans
-# roughly a narrow residential street to a wide multi-lane corridor, so
-# ordinary streets land mid-scale and outliers read as outliers.
 WIDTH_COLOR_MIN_M = 4.0
 WIDTH_COLOR_MAX_M = 20.0
 
@@ -113,11 +92,6 @@ def detect_roads(tile_path: Path, window: Window | None = None, stride_px: int =
     print(f"  road surface: {surface.sum():,} px ({surface.mean():.0%} of frame); "
           f"shadow exclusion cut {cut:,} px ({cut / max(before_shadow.sum(), 1):.0%})")
 
-    # Width comes from OSM centerlines rather than the mask's own shape --
-    # see detection/centerline_width.py for why that's necessary at tile
-    # scale. Only streets: bike lanes are a separate surface with their own
-    # detector, and measuring them against the asphalt mask would report the
-    # road they run alongside.
     osm = fetch_osm_features(bounds)
     streets = osm[osm.category == "street"].clip(box(*bounds))
     print(f"  {len(streets)} OSM street way(s) crossing this extent")
@@ -160,13 +134,10 @@ def render_width_map(
 ) -> Path:
     """Draw each measured way over the imagery, colored by its median width.
 
-    Deliberately drawn over plain imagery, with the traced surface *not*
-    tinted underneath. Tinting it was tried and reverted: the tint reads as
-    another color in the same blue-cyan range the width scale uses at its
-    low end, so the network washes out to one hue and the widths stop being
-    readable -- which is the only thing this figure exists to show. Coverage
-    is what `<tile>_roads_surface.png` is for; keeping the two figures to
-    one question each keeps both legible.
+    Over plain imagery, with the traced surface *not* tinted underneath:
+    tinting was reverted because the tint reads in the same blue-cyan range the
+    width scale uses, washing the widths out. Coverage is what
+    `<tile>_roads_surface.png` is for; one question per figure keeps both legible.
     """
     with rasterio.open(tile_path) as src:
         image = np.transpose(src.read([1, 2, 3], window=window), (1, 2, 0))
@@ -205,9 +176,6 @@ def main() -> None:
 
     records, overlay, surface = detect_roads(tile_path, window, stride_px)
 
-    # Windowed runs get the window in their filenames. Without this a quick
-    # test over a corner of a tile silently overwrites the outputs of a
-    # full-tile run of the same tile -- which costs half an hour to redo.
     stem = tile_path.stem
     if window is not None:
         stem += f"_x{window.col_off:.0f}y{window.row_off:.0f}w{window.width:.0f}h{window.height:.0f}"
@@ -221,9 +189,6 @@ def main() -> None:
     preview.save(preview_path)
     print(f"Wrote {preview_path}")
 
-    # The scan is the expensive part by far, so keep its result -- a
-    # different overlay or a re-run of the width measurement shouldn't mean
-    # paying for it again.
     surface_path = OUTPUT_DIR / f"{stem}_roads_surface.npz"
     np.savez_compressed(surface_path, surface=surface)
     print(f"Wrote {surface_path}")

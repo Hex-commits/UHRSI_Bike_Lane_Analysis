@@ -1,35 +1,25 @@
 """Measure a surface's width by casting rays perpendicular to a known centerline.
 
-The methods in width.py both infer a direction from the mask itself -- the
-medial axis, or PCA on the pixel coordinates. Both work on a single isolated
-stretch of surface and both break down at tile scale, because traced
-pavement connects into networks: a T-junction has no dominant axis, so PCA
-on it returns something diagonal and the "width" that follows is measured
-across the junction rather than across either road. Measured on one 300x300 m
-test region, that produced a 28 m road (a T-junction) and a 55 m road (a
-parking lot).
+width.py infers a direction from the mask itself (medial axis, or PCA), which
+breaks down at tile scale because traced pavement connects into networks: a
+T-junction has no dominant axis, so PCA returns something diagonal and the
+"width" is measured across the junction. On one 300x300 m test region that
+gave a 28 m road (a T-junction) and a 55 m road (a parking lot).
 
-Here the direction comes from OSM's road centerlines instead, which the
-pipeline already fetches and caches (`scripts/osm_features.py`). For each
-sampled point along a way, the local tangent gives a perpendicular, and the
-width is how far the traced surface actually extends along that
-perpendicular in each direction. That fixes three things at once:
-
-- junctions stop mattering, because each OSM way is measured as its own unit
-  regardless of what it touches
-- surfaces with no centerline are never measured at all, so pavement the
-  coarse texture discriminant wrongly picked up does not become a road
-  unless OSM says a road is there
-- results are keyed to OSM ways, so a width can be joined back to that way's
-  own tags
+Here the direction comes from OSM's road centerlines instead (already fetched
+and cached by `scripts/osm_features.py`). Per sampled point along a way, the
+local tangent gives a perpendicular, and the width is how far the traced
+surface extends along it in each direction. This fixes three things: junctions
+stop mattering (each way is measured as its own unit); surfaces with no
+centerline are never measured, so pavement the discriminant wrongly picked up
+doesn't become a road unless OSM says one is there; and results key to OSM
+ways, so a width joins back to that way's tags.
 
 This is *not* the rejected idea of using the OSM buffer as a region of
-interest. The buffer is not the measurement: the ray stops where the traced
-asphalt stops. The buffer does still bound how far a ray can possibly get,
-since the prefiltered imagery is masked to it, so `buffer_limited` records
-any sample that ran into that edge rather than into a real surface
-boundary -- a clipped measurement stays visible instead of silently
-reading as a narrow road.
+interest -- the ray stops where the traced asphalt stops. The buffer does
+bound how far a ray can reach (the prefiltered imagery is masked to it), so
+`buffer_limited` flags any sample that ran into that edge rather than a real
+surface boundary, keeping a clipped measurement visible.
 """
 
 from dataclasses import dataclass
@@ -38,31 +28,14 @@ import numpy as np
 from rasterio.transform import Affine
 from shapely.geometry import LineString, MultiLineString
 
-# How far apart to sample along a way. 5 m is short enough to catch a real
-# change in width along a street and long enough that one tile's road
-# network stays a few thousand samples rather than a few hundred thousand.
 SAMPLE_INTERVAL_M = 5.0
 
-# How far a ray may travel from the centerline before giving up. 15 m is
-# already wider than any half-carriageway in this imagery, so a ray that
-# reaches it is following something other than the road it started on --
-# across a junction, or out into an adjoining car park.
 MAX_HALF_WIDTH_M = 15.0
 
-# A ray crosses gaps up to this long and keeps going. The traced surface is
-# interrupted by lane markings, cars and tree shadow, and a ray that stopped
-# at the first one would measure the distance to the nearest painted line
-# rather than the road. Sized to pass a lane marking or a car's width but
-# not a whole sidewalk.
 GAP_TOLERANCE_M = 1.5
 
-# Step along the ray, as a fraction of a pixel. Below 1 px so a ray crossing
-# diagonally can't skip past a thin feature between samples.
 RAY_STEP_PX = 0.5
 
-# Distance either side of a sample point used to estimate the local tangent.
-# Wide enough not to be dominated by the vertex spacing of an OSM way, which
-# can be very fine on a curve.
 TANGENT_HALF_SPAN_M = 2.5
 
 
@@ -72,8 +45,8 @@ class WidthSample:
 
     distance_along_m: float
     width_m: float
-    buffer_limited: bool  # a ray stopped at masked-out background, not a real edge
-    unbounded: bool  # a ray hit the cap without finding an edge -- width is a lower bound
+    buffer_limited: bool
+    unbounded: bool
 
 
 @dataclass
@@ -130,8 +103,6 @@ def _ray_extent_m(
         col, row = inverse_transform * (x, y)
         col, row = int(col), int(row)
         if not (0 <= row < height and 0 <= col < width):
-            # Ran off the raster itself; treat like hitting the buffer edge,
-            # since either way the surface was not observed to end.
             return last_on_surface, True, False
         if mask[row, col]:
             last_on_surface = distance_m
@@ -183,7 +154,7 @@ def measure_along_centerline(
         samples.append(
             WidthSample(
                 distance_along_m=float(distance_m),
-                width_m=float(left_m + right_m + pixel_size_m),  # + the centerline pixel itself
+                width_m=float(left_m + right_m + pixel_size_m),
                 buffer_limited=bool(left_clipped or right_clipped),
                 unbounded=bool(left_open or right_open),
             )

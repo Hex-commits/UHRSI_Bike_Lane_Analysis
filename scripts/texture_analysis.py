@@ -1,47 +1,33 @@
 """Diagnostic tools for the texture-embedding detector (see texture_embedding.py, detection/texture_detector.py).
 
-Not used by the production pipeline -- these are standalone sanity checks,
-run by hand while developing/tuning the reference set or the detector, not
-part of any automated flow. Two things live here:
+Standalone sanity checks, run by hand while tuning the reference set or
+detector -- not part of the production pipeline. Three things live here:
 
 - `print_report` -- pairwise cosine similarity between every reference
-  embedding, flagging same-class vs. different-class overlap. Run whenever
-  reference images under TEXTURES_DIR change:
+  embedding, flagging same-class vs different-class overlap. Run when
+  reference images under TEXTURES_DIR change; this is the check that caught
+  the reference set's original problem (bikelane vs road came out *more*
+  similar (0.87) than bikelane vs bikelane (0.85), the overlap
+  `discriminant_score` routes around):
 
       uv run python -m scripts.texture_analysis
 
-  This is exactly the ad-hoc check that caught the reference set's original
-  problem: bikelane vs. road (different class) came out *more* similar
-  (0.87) than bikelane vs. bikelane (same class, 0.85) -- overlap that
-  `discriminant_score` was written to route around, but that's still worth
-  checking directly rather than only noticing it indirectly through
-  misclassified real crops.
-
-- `visualize_scan` -- runs the sliding-window detector over one bounded
-  region and saves a 3-panel PNG (RGB | continuous score heatmap |
-  thresholded mask). Slow (~90s for an ~870x580 region on this machine's
-  MPS backend) -- meant for eyeballing the detector against a specific
-  region you already have some expectation for, not routine use:
+- `visualize_scan` -- sliding-window detector over one region, saved as a
+  3-panel PNG (RGB | score heatmap | thresholded mask). Slow (~90s for
+  ~870x580 on MPS), for eyeballing a specific region:
 
       uv run python -m scripts.texture_analysis data/output/foo.tif 80 1990 870 580
 
-- `visualize_edge_trace` -- runs the coarse CNN detector, then
-  detection/edge_trace.py's classical color-based edge tracer, over one
-  bounded region; saves a 3-panel PNG (RGB | coarse window-block mask |
-  traced pixel-precise mask) and prints width statistics from the traced
-  mask via detection/width.py. The coarse mask alone is not precise enough
-  to measure width from (its shape is the scan window's footprint, not the
-  lane's -- see edge_trace.py's module docstring); this is the step that
-  makes width measurement meaningful:
+- `visualize_edge_trace` -- coarse CNN detector then edge_trace.py's color
+  tracer over one region; 3-panel PNG (RGB | coarse block mask | traced mask)
+  plus width stats from the traced mask (the coarse mask's shape is the scan
+  window's footprint, not the lane's):
 
       uv run python -m scripts.texture_analysis edges data/output/foo.tif 80 1990 870 580
 
-  The `road` mode shows the road surface instead (RoadEdgeDetector), which
-  is now just the thresholded CNN mask -- so its two right-hand panels are
-  near-identical by construction, and it is a view of the coarse detector
-  rather than of a trace. No width is printed for it: a road's width is
-  measured from OSM centerlines, not from this mask's shape, and belongs to
-  `scripts.detect_roads` (see README's "Road detection"):
+  `road` mode shows RoadEdgeDetector instead -- now just the thresholded CNN
+  mask, so its right-hand panels are near-identical and no width is printed
+  (road width comes from OSM centerlines in `scripts.detect_roads`):
 
       uv run python -m scripts.texture_analysis road data/output/foo.tif 80 1990 870 580
 """
@@ -63,9 +49,6 @@ from scripts.detection.width import measure_width_m
 from scripts.texture_embedding import cosine_similarity, load_references
 
 
-# Distinct hues for the per-segment traced overlay, in the same
-# largest-first order as the width table, so a row can be matched to a
-# region on sight.
 SEGMENT_COLORS = [
     (0, 255, 255),
     (255, 0, 255),
@@ -140,7 +123,7 @@ def visualize_scan(
     detections = detector.predict(image)
 
     scanned = ~np.isnan(score_map)
-    normalized = np.clip((score_map + 0.3) / 0.6, 0, 1)  # roughly maps [-0.3, 0.3] -> [0, 1]
+    normalized = np.clip((score_map + 0.3) / 0.6, 0, 1)
     heatmap = (matplotlib.colormaps["RdBu_r"](normalized)[..., :3] * 255).astype(np.uint8)
     heatmap[~scanned] = 0
 
@@ -169,15 +152,11 @@ def visualize_edge_trace(
 ) -> list[Detection]:
     """Scan `window` of `tile_path` and save a 3-panel PNG: RGB | coarse CNN mask | traced mask.
 
-    `surface` picks which of the two detector pairs to run, "bikelane" or
-    "road" -- same panels and same width table either way, since the two
-    pipelines are structurally identical (see detection/edge_trace.py).
-
-    Also prints width statistics (detection/width.py) measured from the
-    traced mask -- the coarse mask's shape is the scan window's footprint,
-    not the lane's, so only the traced mask is meaningful to measure.
-    Returns the traced-mask detections, so a caller that also wants width
-    stats (e.g. generate_pipeline_report.py) doesn't have to re-run the scan.
+    `surface` is "bikelane" or "road". Also prints width statistics
+    (detection/width.py) from the traced mask -- the coarse mask's shape is
+    the scan window's footprint, not the lane's. Returns the traced-mask
+    detections so a caller wanting width stats (generate_pipeline_report.py)
+    needn't re-run the scan.
     """
     if surface == "road":
         coarse_detector = coarse_detector or road_detector()
@@ -188,8 +167,6 @@ def visualize_edge_trace(
     with rasterio.open(tile_path) as src:
         rgb = src.read([1, 2, 3], window=window)
         pixel_size_m = src.res[0]
-        # Band 6 is the shadow mask; roads are cut where it is set, since the
-        # detector cannot classify shadowed surface (see RoadEdgeDetector).
         shadow = src.read(6, window=window) if surface == "road" and src.count >= 6 else None
     image = np.transpose(rgb, (1, 2, 0))
 
@@ -212,13 +189,6 @@ def visualize_edge_trace(
 
     coarse_panel = overlay(coarse_mask, (0.0, 255.0, 0.0))
 
-    # Color per detection only where the detections mean something
-    # individually. For a bike lane they do: each is a separately measured
-    # segment with its own row in the width table below, and the color is
-    # what matches a row to a region. For a road they do not -- there is no
-    # width table, and a "segment" is just a connected component of a mask
-    # stamped in scan-window blocks, so per-component color would be showing
-    # off the mask's own fragmentation as though it were structure.
     traced_panel = image.astype(np.float32)
     if surface == "road":
         traced_panel[traced_mask] = traced_panel[traced_mask] * 0.45 + np.array(SEGMENT_COLORS[0]) * 0.55

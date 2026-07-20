@@ -1,24 +1,20 @@
 """Convert CVAT-exported YOLO-seg annotations into a chipped training dataset.
 
-Annotations are drawn on the full tiles, but
-YOLO trains on much smaller images (this project uses 640px chips, matching
-`ultralytics`' default `imgsz` so chips aren't rescaled/shrunk further --
-bike lanes are only ~10px wide at this resolution, so avoiding extra
-downscaling matters). This chips each annotated tile, clips each polygon to
-the chip it falls in (a polygon straddling a chip boundary becomes multiple
-clipped pieces), and writes out a standard Ultralytics YOLO-seg dataset:
+Annotations are drawn on full tiles, but YOLO trains on smaller images (640px
+chips, matching `ultralytics`' default `imgsz` so chips aren't shrunk further
+-- bike lanes are only ~10px wide here). This chips each annotated tile, clips
+each polygon to the chip it falls in (a straddling polygon becomes multiple
+pieces), and writes a standard Ultralytics YOLO-seg dataset:
 
     data/training/
       images/train/*.png, images/val/*.png
       labels/train/*.txt, labels/val/*.txt
       dataset.yaml
 
-Only chips containing at least one instance are kept. Chips with zero
-instances are NOT treated as background negatives here: the annotated tile
-hasn't necessarily been exhaustively labeled end-to-end (this is described
-as "sample" annotation data), so an empty chip might just be an unannotated
-bike lane rather than a true negative. Revisit this once annotation coverage
-is closer to exhaustive.
+Only chips with at least one instance are kept. Empty chips are NOT treated as
+background negatives: this is "sample" annotation data, not exhaustively
+labeled, so an empty chip might just be an unannotated bike lane. Revisit once
+coverage is closer to exhaustive.
 """
 
 from dataclasses import dataclass
@@ -34,7 +30,7 @@ from shapely.geometry import Polygon, box
 @dataclass
 class _Instance:
     class_id: int
-    polygon: Polygon  # absolute pixel coordinates, in the source tile's frame
+    polygon: Polygon
 
 
 def _load_task(task_dir: Path) -> tuple[dict[int, str], dict[str, list[_Instance]]]:
@@ -52,7 +48,7 @@ def _load_task(task_dir: Path) -> tuple[dict[int, str], dict[str, list[_Instance
             parts = line.split()
             class_id = int(parts[0])
             coords = [float(v) for v in parts[1:]]
-            if len(coords) < 6:  # need at least 3 points
+            if len(coords) < 6:
                 continue
             xy_norm = list(zip(coords[0::2], coords[1::2]))
             instances.append((class_id, xy_norm))
@@ -97,11 +93,11 @@ def export_dataset(
     instances_by_stem: dict[str, list[tuple[int, list[tuple[float, float]]]]] = {}
     for task_dir in task_dirs:
         task_class_names, task_instances = _load_task(task_dir)
-        class_names.update(task_class_names)  # assumes consistent numbering across tasks
+        class_names.update(task_class_names)
         for stem, instances in task_instances.items():
             instances_by_stem.setdefault(stem, []).extend(instances)
 
-    chips_written: list[tuple[Path, str]] = []  # (image_path, label_text)
+    chips_written: list[tuple[Path, str]] = []
     step = chip_size_px - chip_overlap_px
 
     for stem, raw_instances in instances_by_stem.items():
@@ -141,12 +137,12 @@ def export_dataset(
     if not chips_written:
         raise RuntimeError("No chips contained any annotated instance -- nothing to export")
 
-    chips_written.sort(key=lambda c: c[0])  # deterministic order before splitting
+    chips_written.sort(key=lambda c: c[0])
     for images_dir in ("images/train", "images/val", "labels/train", "labels/val"):
         (output_dir / images_dir).mkdir(parents=True, exist_ok=True)
 
     n_val = max(1, round(len(chips_written) * val_fraction)) if len(chips_written) > 1 else 0
-    n_val = min(n_val, len(chips_written) - 1) if n_val else 0  # always keep >=1 chip for train
+    n_val = min(n_val, len(chips_written) - 1) if n_val else 0
     val_start = len(chips_written) - n_val
 
     for i, (chip_name, image, label_text) in enumerate(chips_written):

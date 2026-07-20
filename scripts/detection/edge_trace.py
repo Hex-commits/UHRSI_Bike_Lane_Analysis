@@ -1,94 +1,39 @@
 """Precise bike-lane masks: CNN coarse localization, then classical color edge tracing.
 
-Two detectors live here, and they are no longer variations on one another.
+Two detectors live here. `BikeLaneEdgeDetector` is the full pipeline: coarse
+CNN region, pixel-precise color threshold inside it, per-component shape
+regularization, directional bridging. `RoadEdgeDetector` is now only the
+coarse CNN mask -- its color test was removed after being measured (it
+discarded two thirds of its region of interest into 138 fragments, and every
+cleanup step after moved the boundary a width gets measured from). The
+asymmetry is deliberate: bike-lane paint has a strong color cue so a color
+test localizes it, road surface does not. Road width is measured separately
+from OSM centerlines (detection/centerline_width.py).
 
-`BikeLaneEdgeDetector` is the full pipeline this module was built for:
-coarse CNN region, pixel-precise color threshold inside it, per-component
-shape regularization, directional bridging.
+The CNN mask is only a region-of-interest: it is stamped in TEXTURE_WINDOW_PX
+blocks (~4.4m at 0.2m/px), far wider than a real ~2m lane, so a width read
+directly off it would measure the window grid. Inside the ROI the lane's true
+edges are found by color threshold -- bike-lane paint is saturated red, and
+that signal is precise to the pixel.
 
-`RoadEdgeDetector` is now only the coarse CNN mask. Its color test and the
-morphology serving it were removed after being measured: on the
-representative frame the asphalt color test discarded two thirds of its own
-region of interest (109,526 px -> 36,437 px) and left 138 fragments, and
-every cleanup step after it moved the boundary that a width gets measured
-from. What replaced it is a stricter CNN threshold and no per-pixel step at
-all -- see `RoadEdgeDetector`. Road width is measured separately, from OSM
-centerlines, in detection/centerline_width.py.
+That raw color mask still isn't the lane's shape: it inherits local dropouts
+and bulges, so `_regularize_band` rebuilds each connected component as a
+constant-width band around a smoothed centerline (`_binned_centerline`: PCA
+for the dominant axis, bin pixels along it, each bin's average position is a
+centerline point, the median distance-to-edge is the radius). Binning is used
+rather than skeletonization, which on this porous ~72%-recall mask produced a
+branchy structure no spur-pruning could reduce to one clean line.
 
-That asymmetry is deliberate and worth stating: bike-lane paint has a strong
-color cue, so a color test genuinely localizes it. Road surface does not,
-so a color test there was mostly discarding real road.
+Regularizing per component can leave a lane split where the color signal
+dropped out entirely (a parked car, deep shadow), so
+`BikeLaneEdgeDetector.predict` bridges components whose endpoints are close
+*and* aimed at each other (BRIDGE_* below); the direction check is what makes
+generous distance safe.
 
-texture_detector.TextureEmbeddingDetector answers "is there bike-lane paint
-somewhere in this window" -- useful for finding lanes, but its mask is
-stamped in TEXTURE_WINDOW_PX blocks (22px = 4.4m at this imagery's 0.2m/px), well
-over twice the width of a real lane (~10px/2m, see config.py's
-TRAINING_CHIP_SIZE_PX comment). A width measurement taken directly from that
-mask would measure the window grid, not the lane.
-
-This module fixes that by treating the CNN mask as a region-of-interest
-only, then finding the lane's true edges within it via plain color
-thresholding: bike-lane paint is saturated red, and that signal is precise
-down to the pixel rather than the window.
-
-The color-threshold mask alone still isn't the lane's actual shape, though
--- it inherits every local dropout (shade dappling missing a patch) and
-bulge (a fragment of similarly-colored ground bleeding in) pixel by pixel,
-so its edges are noisy and uneven in a way a real lane's aren't: a lane
-holds close to one width along its length rather than "bleeding out"
-unevenly, and runs straight or gently curving rather than zigzagging.
-`_regularize_band` fixes both, per connected component, via `_binned_centerline`:
-
-1. find the component's own dominant direction (PCA on its pixel
-   coordinates) and bin its pixels along that axis; each bin's *average*
-   position is one centerline point. This assumes the component doesn't
-   hairpin -- true for a bike lane, which a real one doesn't do.
-2. take the *median* distance-to-edge sampled at those centerline points --
-   the majority width, robust to the noisy fraction
-3. smooth the (already-ordered, bin-index order) centerline with a moving
-   average, then redraw the mask as a constant-radius band around it -- the
-   shape a real lane would have, not the noisy one the raw color mask traced
-
-Skeletonizing the raw mask (tried first) doesn't work here: this mask's
-recall is only ~72% (see below), leaving it visibly porous, and
-skeletonize() is very sensitive to exactly that kind of small-scale
-boundary noise -- it turned a single lane into a highly branchy/loopy
-structure that no amount of spur-pruning reduced to one clean line (dozens
-of disconnected debris pixels, not one trunk), even after directly
-morphologically smoothing the mask first. Binning avoids the problem
-entirely by never computing a topological skeleton: noise gets averaged
-into a bin's centroid rather than becoming a spurious branch.
-
-Regularizing per component can still leave a lane split across several
-pieces -- a stretch with zero color-threshold hits (a parked car, deep tree
-shadow) has no pixels to bin at all, so it becomes a real gap between
-components, not a shape defect `_binned_centerline` can smooth away. A real
-lane doesn't have gaps just because something blocked the color signal over
-part of it, so after regularizing each component separately,
-`BikeLaneEdgeDetector.predict` re-connects them: any two components whose
-nearest endpoints are close *and* both already heading straight at each
-other (see BRIDGE_* below) get a straight bridge drawn between them at the
-narrower segment's width, then components joined by a bridge are merged
-back into one Detection. The direction check is what makes this safe to be
-generous with distance -- it's what tells a lane continuing past an
-occluding car apart from some unrelated red feature that just happens to
-sit nearby.
-
-The hue/saturation thresholds are NOT reused from redness.py: that module's
-thresholds were deliberately loose (an enhancement pass wants to touch
-anything even slightly red), which turned out to matter here -- an early
-version of this module that did reuse them recalled only ~55% of true path
-pixels sampled from a real cycle-track crop in
-idop20rgbi_32_404_5757_1_nw_2025_bikelanes.tif (window x=4300,y=1330 --
-tree-branch shadow dappling the path causes local hue/saturation dropout),
-producing a speckled, gappy mask whose distance-transform width came out
-noisy (0.40-5.26 m spread for one path, when the true width should vary
-little along its length). The thresholds below were swept against that same
-crop against a real adjacent-sidewalk sample (window x=4300,y=1330,
-y=0:20,x=440:700) to find a looser hue tolerance that recovers much more of
-the true path (recall ~0.72) while keeping the false-positive rate against
-that neighboring surface low (~0.8%) -- see scratchpad calibrate_sweep.py in
-that session for the swept table, not preserved in this repo.
+Hue/saturation thresholds are NOT reused from redness.py -- its loose
+enhancement thresholds recalled only ~55% of true path pixels here. The
+values below were swept for ~72% recall against a real cycle-track crop while
+keeping false positives against neighboring sidewalk low (~0.8%).
 """
 
 from collections.abc import Callable
@@ -103,94 +48,31 @@ from skimage.morphology import closing, disk, remove_small_objects
 from scripts.detection.base import Detection
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
 
-# Hue distance (circular, in [0, 0.5]) from pure red (hue=0) that still
-# counts as lane/path paint -- looser than redness.py's RED_HUE_TOLERANCE
-# (0.08) because that value, calibrated for an *enhancement* pass, missed
-# too much real paint under partial shade to trace a clean edge from (see
-# module docstring).
 EDGE_HUE_TOLERANCE = 0.15
 
-# Saturation floor for a pixel to count as paint. Slightly higher than
-# redness.py's MIN_SATURATION_FOR_BOOST (0.05) -- paired with the wider hue
-# tolerance above, this keeps the false-positive rate against a real
-# adjacent sidewalk sample low (~0.8%) despite recalling much more of the
-# true path than the boost thresholds did.
 EDGE_MIN_SATURATION = 0.07
 
-# How far (in pixels) to grow the CNN's coarse window-block mask before
-# searching it for paint. The coarse mask is centered on the lane but wider
-# than it (see module docstring); a real paint edge near the border of a
-# scanned window could sit just outside the stamped block, so the ROI grows
-# a bit past it. Cheap to over-grow -- color thresholding below still only
-# keeps pixels that actually look like paint.
 ROI_DILATION_PX = 8
 
-# Gaps in the traced paint (worn patches, leaf litter, a shadow the color
-# threshold missed) shouldn't split one lane into disconnected slivers --
-# closed with a small radius before measuring width. Deliberately small: a
-# bigger isotropic closing here was tried and rejected -- it fattened the
-# *cross-track* width wherever two nearby blobs got dilated into each
-# other, not just the gaps between them (mean width on a real test crop
-# jumped from a plausible ~3-4m to an implausible ~5.5m). Real along-the-lane
-# gaps are bridged directionally after regularization instead (see BRIDGE_*
-# below).
 CLOSING_RADIUS_PX = 2
 
-# Isolated fleck of red (a leaf, a bit of noise) that's too small to be a
-# real stretch of lane paint.
 MIN_COMPONENT_AREA_PX = 15
 
-# Bin size (px) along a component's own dominant axis for `_binned_centerline`.
-# Small relative to a lane's own width so real curvature isn't flattened,
-# large enough that each bin still averages over several noisy pixels.
 CENTERLINE_BIN_WIDTH_PX = 3
 
-# A component spanning fewer bins than this isn't a lane fragment to begin
-# with -- it's residual blob/noise too short to have a meaningful centerline
-# (a stray patch of similarly-colored ground, a car's reflection) -- and is
-# dropped rather than turned into a fabricated band.
 MIN_CENTERLINE_BINS = 7
 
-# Binning already averages out a lot of noise, but bin-to-bin the centerline
-# can still jitter a little; smoothed with a moving average (window tied to
-# the component's own radius, same reasoning as the bin width above) so a
-# real lane comes out running straight or gently curving, not in a zigzag.
 SMOOTHING_WIDTH_MULTIPLE = 3.0
 
-# Bridging two already-regularized segments end to end: max gap (as a
-# multiple of the smaller segment's own radius) that's still worth
-# connecting. Sized generously -- a real occlusion (a parked car sitting on
-# the lane) can span several meters -- because BRIDGE_ALIGNMENT_COS_MIN
-# below is what actually guards against connecting unrelated nearby
-# features, not this distance cap.
 BRIDGE_MAX_GAP_RADIUS_MULTIPLE = 4.0
 
-# How closely the bridge direction (segment A's endpoint straight to
-# segment B's endpoint) must match each segment's own direction of travel
-# at that endpoint, as a cosine similarity -- both segments must be heading
-# essentially straight at each other, not just nearby. cos(35 deg) =~ 0.82:
-# generous enough for a lane's own gentle curvature, tight enough to reject
-# a perpendicular feature (a crosswalk stripe) that happens to sit close by.
 BRIDGE_ALIGNMENT_COS_MIN = 0.82
 
-# How many points back from an endpoint to look when estimating that
-# endpoint's direction of travel -- far enough that bin-level noise in the
-# centerline doesn't dominate the estimate.
 BRIDGE_TANGENT_LOOKBACK_POINTS = 5
 
 
-# How far past the detected shadow mask the road surface is also cut, in
-# pixels (5 px = 1.0 m at this imagery's 0.2 m/px, matching prefiltering's
-# SHADOW_CUT_MARGIN_M). Same reasoning: a real shadow edge is a soft
-# penumbra and the mask's Otsu threshold draws a hard line through it, so
-# pixels just outside the mask still read as partially shadowed and are no
-# more classifiable than the ones inside it.
 SHADOW_EXCLUSION_MARGIN_PX = 5
 
-# A road is an order of magnitude wider than a lane (~6-7 m of carriageway
-# vs ~2 m), so the "too small to be real" floor scales with it: 200 px at
-# 0.2 m/px is 8 m^2, about the footprint of a single car, below which a
-# fragment isn't a stretch of carriageway.
 ROAD_MIN_COMPONENT_AREA_PX = 200
 
 def _paint_mask(image: np.ndarray, roi: np.ndarray) -> np.ndarray:
@@ -238,7 +120,7 @@ def _binned_centerline(mask: np.ndarray) -> list[tuple[float, float]] | None:
 @dataclass
 class Segment:
     mask: np.ndarray
-    points: list[tuple[int, int]]  # ordered centerline, endpoint to endpoint
+    points: list[tuple[int, int]]
     radius: float
 
 
@@ -326,11 +208,8 @@ def _traced_components(
 
     Grow the coarse mask into a region of interest, keep the pixels inside
     it that pass `surface_mask`'s color test, close small gaps, drop specks.
-
     Only the bike-lane detector uses this now; `surface_mask` is kept as a
-    parameter rather than inlined because it is the one part that knows what
-    is being looked for, and that separation is what made it possible to
-    measure the road color test's cost and then remove it.
+    parameter because it is the one part that knows what is being looked for.
     """
     roi = binary_dilation(coarse[0].mask, iterations=ROI_DILATION_PX)
     mask = surface_mask(image, roi)
@@ -356,19 +235,15 @@ class BikeLaneEdgeDetector:
         self._coarse = coarse_detector or bike_lane_detector()
 
     def predict(self, image: np.ndarray, coarse: list[Detection] | None = None) -> list[Detection]:
-        """`coarse` lets a caller that already ran (or otherwise obtained) the
-        coarse scan pass it in directly, instead of paying for another run of
-        the CNN sliding-window scan here -- it's by far the most expensive
-        step in this pipeline.
+        """`coarse` lets a caller that already ran the coarse scan pass it in
+        directly, instead of paying for another CNN sliding-window scan here --
+        by far the most expensive step in this pipeline.
         """
         if coarse is None:
             coarse = self._coarse.predict(image)
         if not coarse:
             return []
 
-        # Regularize each component separately (see _regularize_band) --
-        # components too small/blob-like to have a real centerline are
-        # dropped rather than kept as noise.
         segments = []
         for component in _traced_components(image, coarse, _paint_mask, MIN_COMPONENT_AREA_PX):
             segment = _regularize_band(component)
@@ -377,12 +252,6 @@ class BikeLaneEdgeDetector:
         if not segments:
             return []
 
-        # A stretch with no color-threshold hits at all (a parked car, deep
-        # shadow) becomes a real gap between components -- reconnect any two
-        # that are both close and aimed straight at each other, then let
-        # connected-component labeling on the combined result merge bridged
-        # segments back into one Detection. See module docstring for why
-        # direction, not just distance, gates this.
         combined = np.zeros(image.shape[:2], dtype=bool)
         for segment in segments:
             combined |= segment.mask
@@ -402,29 +271,18 @@ class BikeLaneEdgeDetector:
 class RoadEdgeDetector:
     """Detector (see detection/base.py) for road surface: the CNN mask, and nothing else.
 
-    The colour test this used to run inside the coarse region is gone. It
-    was the single most destructive step in the chain -- on the
-    representative frame it discarded two thirds of the region of interest
-    (109,526 px -> 36,437 px) and shattered what survived into 138
-    fragments, which then needed a morphological closing and a
-    small-component filter to be usable at all. Every one of those steps
-    moved the surface boundary, and the boundary is what a width is measured
-    from.
+    The colour test this used to run inside the coarse region was removed --
+    on the representative frame it discarded two thirds of the region of
+    interest into 138 fragments, and the closing and small-component filter it
+    then needed each moved the boundary a width is measured from. The surface
+    is now the thresholded CNN mask directly, at a stricter threshold
+    (ROAD_SCORE_THRESHOLD) to compensate for no longer being refined
+    downstream; the dilation and closing went with the colour test.
 
-    So the surface is now the thresholded CNN mask directly, at a stricter
-    threshold to compensate for no longer being refined downstream (see
-    ROAD_SCORE_THRESHOLD). The dilation went with the colour test, since it
-    existed only to widen the region that test searched -- keeping it would
-    now just inflate every road by 8 px on each side. The closing went too:
-    the CNN mask is stamped in whole windows and is not speckled the way a
-    per-pixel colour threshold is.
-
-    What this mask cannot do is locate an edge precisely: it is stamped in
-    TEXTURE_WINDOW_PX blocks, so its resolution is 4.4 m at this imagery's
-    scale, and its score ramps over ~5 m across a real road edge rather than
-    stepping at it. It answers "is there road here", not "where does it
-    end". Width comes from detection/ribbon_fit.py, which fits the edges
-    against the continuous imagery instead.
+    This mask cannot locate an edge precisely -- stamped in TEXTURE_WINDOW_PX
+    blocks (~4.4m), it answers "is there road here", not "where does it end".
+    Width comes from detection/ribbon_fit.py, which fits edges against the
+    continuous imagery.
     """
 
     def __init__(self, coarse_detector: TextureEmbeddingDetector | None = None):
@@ -449,27 +307,16 @@ class RoadEdgeDetector:
     ) -> np.ndarray:
         """The road surface: the thresholded CNN mask, minus shadow, with specks dropped.
 
-        `shadow` is the prefiltered tile's own shadow band (band 6), and
-        where it is set the surface is cut. This is not a cosmetic filter.
-        In deep shadow this imagery carries almost no surface information at
-        all: shadowed carriageway and shadowed non-carriageway measure the
-        same to within noise -- median hue distance from red 0.405 vs 0.405,
-        median saturation 0.506 vs 0.519, mean RGB (44,60,81) vs (41,57,79)
-        -- and fitting a discriminant on those pixels and scoring it on the
-        very same pixels still misclassifies 35%, against 20% for the
-        equivalent sunlit comparison. Whatever the detector marks as road
-        inside shadow is therefore close to a coin flip, and cutting it
-        turns a silent error into an honest coverage gap.
-
-        The cut extends SHADOW_EXCLUSION_MARGIN_PX past the detected mask for
-        the same reason `SHADOW_CUT_MARGIN_M` exists in prefiltering: a real
-        shadow edge is a soft penumbra, and the mask's Otsu threshold draws
-        a hard line through it, so pixels just outside still read as
-        partially shadowed.
-
-        The small-component filter runs last, since cutting shadow out of
-        the middle of a run of road is exactly what leaves fragments too
-        small to be meaningful.
+        `shadow` is the prefiltered tile's shadow band (band 6); where set,
+        the surface is cut. In deep shadow this imagery carries almost no
+        surface information -- shadowed carriageway and non-carriageway are
+        indistinguishable to within noise, and a discriminant fit and scored
+        on those very pixels still misclassifies 35% (vs 20% sunlit) -- so
+        cutting it turns a silent error into an honest coverage gap. The cut
+        extends SHADOW_EXCLUSION_MARGIN_PX past the mask, since a real shadow
+        edge is a soft penumbra the Otsu threshold cuts a hard line through.
+        The small-component filter runs last, since cutting shadow out
+        mid-road is what leaves fragments too small to be meaningful.
         """
         if coarse is None:
             coarse = self._coarse.predict(image)

@@ -8,21 +8,13 @@ INPUT_TILES_DIR = PROJECT_ROOT / "data" / "input" / "idop_kacheln"
 OSM_CACHE_PATH = PROJECT_ROOT / "data" / "osm" / "osm_features.gpkg"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 
-# Reference crops for scripts/texture_embedding.py, one subfolder per
-# *surface*: "bikelane", "road", "sidewalk", "rooftop". Named per surface
-# rather than positive/negative because which one is the positive depends on
-# the detector -- see *_TEXTURE_LABELS below.
 TEXTURES_DIR = PROJECT_ROOT / "data" / "input" / "textures"
 
-# The IDOP20 tiles are delivered as ETRS89 / UTM zone 32N.
 TILE_CRS = "EPSG:25832"
 OSM_CRS = "EPSG:4326"
 
-# highway=cycleway is dedicated bike infrastructure with its own geometry.
 BIKE_LANE_HIGHWAY_VALUES = ["cycleway"]
 
-# cycleway(:left/:right/:both) values that mean a lane/track is painted or
-# raised along the road itself (geometry is the road's centerline).
 BIKE_LANE_CYCLEWAY_VALUES = {
     "lane",
     "track",
@@ -33,9 +25,6 @@ BIKE_LANE_CYCLEWAY_VALUES = {
     "opposite_share_busway",
 }
 
-# General road classes bikes are legally allowed to ride on in mixed
-# traffic. Excludes motorway/trunk (Autobahn/Kraftfahrstrasse), where
-# cycling is prohibited in Germany.
 STREET_HIGHWAY_VALUES = [
     "primary",
     "primary_link",
@@ -58,69 +47,30 @@ OSM_TAGS = {
     "bicycle": ["designated"],
 }
 
-# Buffer applied around each feature's centerline, in meters. Streets get a
-# wider buffer since they cover a full carriageway rather than a single lane.
-# Narrowed from 6.0/8.0 -- the wider buffer was generous enough to routinely
-# bleed onto adjacent building rooftops in dense blocks (see Known
-# limitations), and still comfortably covers a real lane (~1.5-3 m) or
-# carriageway (~5-7 m) with margin at these values.
 BIKE_LANE_BUFFER_METERS = 4.5
 STREET_BUFFER_METERS = 6.0
 
-# Integer labels written to the classification band.
 BACKGROUND_LABEL = 0
 BIKE_LANE_LABEL = 1
 STREET_LABEL = 2
 
-# Value written to pixels outside the buffered mask (also doubles as the
-# background label in the classification band).
 NODATA_VALUE = BACKGROUND_LABEL
 
-# How to handle shadowed pixels within the road/bike-lane mask:
-#   "correct" -- brightness-normalize them to match nearby sunlit pixels
-#                (see scripts/shadows.py)
-#   "cut"     -- drop them entirely (zeroed to NODATA_VALUE, same as
-#                background outside the buffer), rather than attempt
-#                correction -- for imagery where shadow correction still
-#                distorts too much of the tile to be usable
-#   "none"    -- leave shadowed pixels untouched (still detected, so the
-#                shadow band is populated, but nothing about the imagery
-#                itself is modified or removed)
 SHADOW_HANDLING = "none"
 
-# When SHADOW_HANDLING is "cut", pixels within this margin of the detected
-# shadow mask are cut too, not just the mask itself. Real shadow edges are
-# soft (penumbra); Otsu's threshold draws a hard line through that gradient,
-# so pixels just outside the detected mask can still be partially shadowed.
-# Cutting only exactly at the mask boundary would keep those, leaving a
-# sharp edge between "cut" and "retained but still slightly shadowed".
 SHADOW_CUT_MARGIN_M = 1.0
 
-# Whether to boost the saturation of reddish pixels within the road/bike-lane
-# mask, so painted bike-lane paint stands out more from gray asphalt (see
-# scripts/redness.py). Unlike a generic contrast stretch, this only touches
-# pixels that already read as red -- gray asphalt, vegetation, etc. are
-# unaffected.
 APPLY_RED_BOOST = True
 
-# Integer labels written to the shadow band.
 NOT_SHADOW_LABEL = 0
 SHADOW_LABEL = 1
 
-# --- Detection: trained YOLO-seg model (see scripts/detection/) ---
 
-# Runs on the prefiltered data/output/ tiles (bands 1-3 = RGB), not the raw
-# input tiles -- matches what the CVAT annotations were drawn on.
 DETECTION_INPUT_DIR = OUTPUT_DIR
 
-# CVAT export(s) in "Ultralytics YOLO segmentation 1.0" format: each
-# subdirectory is one export task, containing data.yaml + labels/train/*.txt.
 ANNOTATIONS_DIR = PROJECT_ROOT / "data" / "input" / "annotated_bike_lanes"
 
 TRAINING_DIR = PROJECT_ROOT / "data" / "training"
-# 640px matches ultralytics' default imgsz, so training chips aren't
-# rescaled/shrunk further -- bike lanes are only ~10px wide at 0.2m/px, so
-# extra downscaling would make them very hard to learn.
 TRAINING_CHIP_SIZE_PX = 640
 TRAINING_CHIP_OVERLAP_PX = 64
 TRAINING_VAL_FRACTION = 0.2
@@ -128,63 +78,18 @@ TRAINING_VAL_FRACTION = 0.2
 YOLO_SEG_BASE_CHECKPOINT = "yolo11n-seg.pt"
 YOLO_SEG_TRAINED_WEIGHTS_PATH = PROJECT_ROOT / "runs" / "segment" / "train" / "weights" / "best.pt"
 
-# Matches TRAINING_CHIP_SIZE_PX: YOLO models perform best near their
-# trained imgsz, so inference chips use the same size the model was
-# fine-tuned on rather than an independently-chosen value.
 DETECTION_CHIP_SIZE_PX = TRAINING_CHIP_SIZE_PX
 DETECTION_CHIP_OVERLAP_PX = TRAINING_CHIP_OVERLAP_PX
 DETECTION_CONFIDENCE_THRESHOLD = 0.25
 
 DETECTION_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelanes.gpkg"
 
-# Fields burned into a GeoTIFF each (data/detections/bikelanes_<field>.tif),
-# for visual inspection without GIS software / overlay against data/output/.
 DETECTION_RASTER_FIELDS = ["score", "width_mean_m"]
 
-# --- Detection: texture-embedding CNN scan (see scripts/detection/texture_detector.py) ---
 
-# Sliding-window crop size, in pixels, fed to the frozen backbone. Matches
-# the reference crops under TEXTURES_DIR -- deliberately NOT a knob to
-# increase for "more resolution": a bigger window was tried and rejected,
-# since it dilutes/averages across more of the surrounding surface per
-# window and measurably hurt classification quality despite needing less
-# upsampling to the model's fixed 256px input.
 TEXTURE_WINDOW_PX = 22
 
-# Which reference surfaces each texture detector discriminates between, as
-# (positive_label, negative_labels).
-#
-# "negative" is the bike-lane detector's original six-crop negative set (one
-# road, one sidewalk, four rooftops) and is deliberately left exactly as it
-# was: SCORE_THRESHOLD in detection/texture_detector.py is calibrated
-# against it, and folding the newer road/ crops in as extra bike-lane
-# negatives was tried and reverted -- it shifted the whole bike-lane score
-# distribution down by ~0.16, far enough that the calibrated threshold
-# stopped firing at all and would have needed re-deriving to a negative
-# value. Road detection is an addition here, not a reason to recalibrate a
-# working detector.
-#
-# The road detector therefore reuses that same set as negatives, plus
-# bikelane. It contains one road crop (negative/road.png, the same image as
-# road/asphalt_1.png) which is thus on both sides of the road discriminant.
-# That was checked rather than assumed, and it turns out to *help*: removing
-# it costs 0.033 of Youden's J on the representative frame (0.391 -> 0.357).
-# Pooling one road crop into the negative mean evidently pulls that mean
-# towards pavement-in-general, which sharpens the road-specific component
-# the discriminant is left to isolate, the same effect that motivated
-# discriminant_score over raw similarity in the first place. So it stays.
 BIKE_LANE_TEXTURE_LABELS = ("bikelane", ("negative",))
 ROAD_TEXTURE_LABELS = ("road", ("bikelane", "negative"))
 
-# Step size, in pixels, between successive scan windows -- this is what
-# actually controls the *resolution* of the resulting score map/heatmap:
-# smaller stride means more overlapping sample points and a finer, less
-# blocky result, at roughly (TEXTURE_STRIDE_PX / new_stride)^2 the compute
-# cost (window count grows quadratically as stride shrinks). 11 (50%
-# overlap) is the default used for full-tile runs -- a full 5000x5000 tile
-# already takes ~23 minutes at this setting, so a smaller stride is only
-# practical scoped to a bounded cutout, not a whole tile; pass a smaller
-# stride_px to TextureEmbeddingDetector's constructor (or via
-# `texture_analysis`'s CLI) for a one-off higher-resolution scan of a
-# cutout, rather than lowering this default.
 TEXTURE_STRIDE_PX = 11

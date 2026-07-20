@@ -31,9 +31,6 @@ from scripts.mask import rasterize_mask
 from scripts.redness import boost_red_saturation
 from scripts.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
 
-# The IDOP20 RGBI tiles are R, G, B, then near-infrared. GDAL's GeoTIFF
-# driver otherwise defaults an untagged 4th band to Alpha, which makes GIS
-# viewers render the masked-out areas as transparent instead of nodata.
 _ORIGINAL_RGBI_COLORINTERP = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.undefined)
 
 
@@ -42,24 +39,18 @@ def filter_tile(
 ) -> Path:
     """Mask a single imagery tile to its bike lane/street buffers and write it out.
 
-    Output keeps the source's full resolution (compress="deflate", lossless);
-    pixels outside both buffers are zeroed out. Shadowed pixels within the
-    buffers are handled per `SHADOW_HANDLING`: "correct" brightness-normalizes
-    them to match nearby sunlit pixels (see scripts/shadows.py), so retained
-    pixel values are no longer guaranteed to be bit-identical to the source
-    there; "cut" drops them entirely, same as background outside the buffer --
-    and drops a further `SHADOW_CUT_MARGIN_M` beyond the detected mask too,
-    since a real shadow's edge is a soft penumbra that the mask's hard
-    threshold cuts through, so pixels just outside it can still be partially
-    shadowed; "none" leaves shadowed pixels untouched. If APPLY_RED_BOOST is
-    set, reddish pixels (bike-lane paint) within the retained buffer get a
-    saturation boost afterwards (see scripts/redness.py). Two extra bands are
-    appended: a classification band (0=background, 1=bikelane, 2=street;
-    bikelane takes priority where the buffers overlap, reflecting whichever
-    pixels were actually retained) and a shadow band (0=not shadowed,
-    1=shadowed, reflecting detection only, not the cut margin; populated
-    regardless of SHADOW_HANDLING, even where "cut" means those pixels end
-    up as background/nodata in the other bands).
+    Output keeps full resolution (deflate, lossless); pixels outside both
+    buffers are zeroed. Shadowed pixels within the buffers follow
+    `SHADOW_HANDLING`: "correct" brightness-normalizes them (scripts/shadows.py,
+    so values are no longer bit-identical to source); "cut" drops them like
+    background, plus a further `SHADOW_CUT_MARGIN_M` beyond the mask since a
+    shadow's edge is a soft penumbra the hard threshold cuts through; "none"
+    leaves them untouched. If APPLY_RED_BOOST is set, reddish paint pixels get
+    a saturation boost (scripts/redness.py). Two bands are appended: a
+    classification band (0=background, 1=bikelane, 2=street; bikelane wins on
+    overlap, reflecting retained pixels) and a shadow band (0/1, detection only
+    not the cut margin; populated regardless of SHADOW_HANDLING, even where
+    "cut" left those pixels as nodata elsewhere).
     """
     with rasterio.open(tile_path) as src:
         profile = src.profile.copy()
@@ -84,7 +75,6 @@ def filter_tile(
         combined_mask = combined_mask & ~cut_mask
     elif SHADOW_HANDLING == "correct":
         data = correct_shadows(data, shadow_mask, combined_mask, pixel_size_m)
-    # "none": shadowed pixels are left untouched.
 
     classification = np.zeros(shape, dtype=data.dtype)
     classification[street_mask] = STREET_LABEL
@@ -108,8 +98,6 @@ def filter_tile(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(out_path, "w", **profile) as dst:
-        # Color interpretation must be set before the first write: GDAL bakes
-        # the TIFF ExtraSamples/alpha tag into the directory at that point.
         if band_count == 4:
             dst.colorinterp = _ORIGINAL_RGBI_COLORINTERP + (ColorInterp.undefined, ColorInterp.undefined)
         dst.write(output)

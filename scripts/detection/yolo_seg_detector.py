@@ -32,7 +32,7 @@ class YoloSegDetector:
         for xy, score, cls_id in zip(
             results.masks.xy, results.boxes.conf.tolist(), results.boxes.cls.tolist()
         ):
-            if xy.shape[0] < 3:  # need at least 3 points for a polygon
+            if xy.shape[0] < 3:
                 continue
             mask = _polygon_to_mask(xy, shape)
             if not mask.any():

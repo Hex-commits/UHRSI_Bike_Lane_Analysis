@@ -1,16 +1,12 @@
 """Generate a visual, stage-by-stage walkthrough of the pipeline for writeups.
 
-Runs one fixed, already-validated example region (tile 404_5757, the pixel
-window used throughout this project's development to test each stage) through
-every stage of the pipeline -- raw imagery, OSM masking, shadow detection, red
-boost, the prefiltered output, the CNN texture scan, and edge tracing/shape
-regularization/bridging -- and writes docs/pipeline_report.md with one figure
-per stage plus a width-measurement table.
-
-Deliberately scoped to a small region rather than a full tile: a full-tile
-CNN scan takes 20+ minutes (or hours at a finer stride), which would make
-"regenerate after every change" impractical. This takes well under a minute.
-Re-run after any pipeline change to keep the report current:
+Runs one fixed, validated example region (tile 404_5757, the window used
+throughout development) through every stage -- raw imagery, OSM masking,
+shadow detection, red boost, prefiltered output, CNN texture scan, edge
+tracing/regularization/bridging -- and writes docs/pipeline_report.md with one
+figure per stage plus a width-measurement table. Scoped to a small region
+rather than a full tile so it takes under a minute (a full-tile CNN scan takes
+20+ minutes), making "regenerate after every change" practical:
 
     uv run python -m scripts.generate_pipeline_report
 """
@@ -19,14 +15,18 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import rasterio
 from PIL import Image
 from rasterio.windows import Window
+from shapely.geometry import box
 
-from scripts.config import INPUT_TILES_DIR, OUTPUT_DIR
+from scripts.config import INPUT_TILES_DIR, OUTPUT_DIR, TILE_CRS
 from scripts.detection.texture_detector import bike_lane_detector, road_detector
 from scripts.detection.width import measure_width_m
+from scripts.measure_bikelane_gap import load_chunk, measure_gaps, prepare_shadow, render_map
+from scripts.osm_features import fetch_osm_features
 from scripts.texture_analysis import visualize_edge_trace, visualize_scan
 
 TILE_STEM = "idop20rgbi_32_404_5757_1_nw_2025"
@@ -77,45 +77,75 @@ def main() -> None:
         shadow = src.read(6, window=WINDOW)
         pixel_size_m = src.res[0]
 
-    # 1. raw input imagery
     _save_png(raw_rgb, FIGURES_DIR / "01_raw.png")
 
-    # 2. OSM road/bike-lane buffer mask
     osm_overlay = _overlay(raw_rgb, classification == 1, (255, 0, 0))
     osm_overlay = _overlay(osm_overlay, classification == 2, (0, 128, 255))
     _save_png(osm_overlay, FIGURES_DIR / "02_osm_mask.png")
 
-    # 3. shadow detection
     shadow_overlay = _overlay(raw_rgb, shadow == 1, (255, 200, 0))
     _save_png(shadow_overlay, FIGURES_DIR / "03_shadow_mask.png")
 
-    # 4. red-saturation boost, before/after
     _side_by_side(raw_rgb, prefiltered_rgb, FIGURES_DIR / "04_red_boost.png")
 
-    # 5. prefiltered output -- what detection actually runs on
     _save_png(prefiltered_rgb, FIGURES_DIR / "05_prefiltered.png")
 
-    # 6. texture-embedding CNN coarse scan
     coarse_detector = bike_lane_detector()
     visualize_scan(OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "06_cnn_scan.png", detector=coarse_detector)
 
-    # 7. edge tracing + shape regularization + bridging (reuses the scan above)
     edge_detections = visualize_edge_trace(
         OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "07_edge_trace.png", coarse_detector=coarse_detector
     )
 
-    # 8. width measurement, per final segment
     width_rows = _width_rows(edge_detections, pixel_size_m)
 
-    # 9. the same two stages again for road surface, not bike-lane paint
     road_coarse = road_detector()
     road_detections = visualize_edge_trace(
         OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "09_road_trace.png", coarse_detector=road_coarse, surface="road"
     )
     road_surface_px = int(sum(d.mask.sum() for d in road_detections))
 
-    _write_report(width_rows, road_surface_px, len(road_detections))
+    gap_summary = _bikelane_gap(FIGURES_DIR / "10_bikelane_gap.png")
+
+    _write_report(width_rows, road_surface_px, len(road_detections), gap_summary)
     print(f"Wrote {REPORT_PATH} and {len(list(FIGURES_DIR.glob('*.png')))} figures in {FIGURES_DIR}")
+
+
+def _bikelane_gap(figure_path: Path) -> dict:
+    """Run the 1-D gap measurement on the report window and render its map.
+
+    Reuses `scripts.measure_bikelane_gap` end to end -- the same code the
+    standalone tool runs -- so this figure can never drift from the tool.
+    Scoped to the report's fixed WINDOW like every other stage; it happens to
+    hold 9 OSM bike-lane ways alongside 10 streets, enough for a worked
+    example.
+    """
+    bands, transform, bounds, pixel_size_m = load_chunk(WINDOW)
+    osm = fetch_osm_features(bounds)
+    clip = box(*bounds)
+    streets = osm[osm.category == "street"].clip(clip)
+    lanes = osm[osm.category == "bikelane"].clip(clip)
+
+    corrected, shadow, near_edge = prepare_shadow(bands, transform, bounds, pixel_size_m, streets)
+    records, _sections, _skipped = measure_gaps(corrected, transform, bounds, shadow,
+                                                near_edge, streets, lanes)
+    frame = gpd.GeoDataFrame(records, crs=TILE_CRS)
+
+    aspect = WINDOW.width / WINDOW.height
+    render_map(bands, transform, frame, lanes, figure_path, pixel_size_m,
+               figsize=(13, 13 / aspect + 3))
+
+    reliable = frame[frame.reliable]
+    gaps = reliable.gap_m.to_numpy()
+    composition = {k: int(v) for k, v in reliable.composition.value_counts().items()}
+    return {
+        "measured": len(reliable),
+        "total": len(frame),
+        "in_shadow": int((~frame.reliable).sum()),
+        "median_gap_m": float(np.median(gaps)) if len(gaps) else float("nan"),
+        "no_strip_pct": float((gaps == 0).mean()) if len(gaps) else 0.0,
+        "composition": composition,
+    }
 
 
 def _width_rows(detections: list, pixel_size_m: float) -> list[tuple[int, int, "object"]]:
@@ -127,11 +157,14 @@ def _width_rows(detections: list, pixel_size_m: float) -> list[tuple[int, int, "
     return rows
 
 
-def _write_report(width_rows: list[tuple[int, int, "object"]], road_surface_px: int, road_components: int) -> None:
+def _write_report(width_rows: list[tuple[int, int, "object"]], road_surface_px: int,
+                  road_components: int, gap: dict) -> None:
     width_table_rows = "\n".join(
         f"| {i} | {px:,} | {stats.mean_m:.2f} | {stats.median_m:.2f} | {stats.min_m:.2f} | {stats.max_m:.2f} | {stats.n_samples} |"
         for i, px, stats in width_rows
     )
+    gap_composition = ", ".join(f"{count} {kind}" for kind, count in
+                                sorted(gap["composition"].items(), key=lambda kv: -kv[1]))
     content = f"""# Pipeline walkthrough: one worked example
 
 *Auto-generated by `scripts/generate_pipeline_report.py`. Do not edit by hand; regenerate after any
@@ -235,13 +268,13 @@ Every stage below runs on the same fixed example region:
 - **Left:** RGB
 - **Middle:** the raw coarse mask, before shadow is cut
 - **Right:** the road surface -- the same mask with shadowed pixels removed. The difference is the
-  scatter of blocks across the dark carriageway on the left, which the coarse detector claimed and
+  scatter of blocks across the dark road on the left, which the coarse detector claimed and
   which cannot be verified either way
 
 ![road surface](figures/09_road_trace.png)
 
 **Shadow is cut, not kept.** In deep shadow this imagery carries almost no surface information:
-shadowed carriageway and shadowed non-carriageway measure the same to within noise (median hue
+shadowed road and shadowed non-road measure the same to within noise (median hue
 distance from red 0.405 vs 0.405, saturation 0.506 vs 0.519), and a discriminant fitted and scored
 on the very same pixels still misclassifies 35%. Anything marked road there is close to a coin
 flip, so it is removed along with a 5 px penumbra margin. On this frame that cut 20% of the road
@@ -262,6 +295,34 @@ be measuring the scan grid. Road widths are measured from OSM centerlines by
 The colour test and morphology that used to sit here were removed after being measured: the colour
 test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
 step after it moved the boundary a width would be taken from.
+
+## 10. road-to-bike-lane gap
+
+- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
+  the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
+  `README.md`
+- **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask on the left of step 9 is
+  quantised to 4.4 m blocks. A cross-section cut from the pixels locates each edge subpixel (measured
+  precision ~0.08 m on this tile) where the mask cannot resolve the feature at all
+- **OSM as scaffold only:** street/lane centerlines say *where* to cut and which way to face; every
+  edge, width and gap is read off pixels
+- **Colour:** each lane segment coloured by the gap to the road; **0 m** (light blue) is a
+  measured result -- the lane is flush with or painted on the road, with no separating strip -- not a
+  blank. Grey is shadow, the only genuinely unmeasurable case
+
+![bikelane gap](figures/10_bikelane_gap.png)
+
+**On this frame:** {gap["measured"]} of {gap["total"]} cross-sections measured, {gap["in_shadow"]} in
+shadow; median gap {gap["median_gap_m"]:.2f} m, and {gap["no_strip_pct"]:.0%} with no separating strip
+at all ({gap_composition}). That most lanes read 0 m is the real picture of the district: most cycling
+infrastructure here is painted onto or flush with the road. A gap only opens up where a verge,
+buffer or paved strip physically separates the two -- those are the coloured stretches.
+
+**`contiguous` is "no separating strip detected", not a certified zero.** A paint line fainter than
+`MARKING_MIN_EXCESS`, or a low-contrast material change, would be missed and also land at 0 m. The
+`composition` field keeps the distinction (`contiguous` = no boundary found, vs `abutting` = boundary
+found with zero strip) so it can be audited; putting an error bar on it would need ground-truth
+cross-sections.
 """
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(content)

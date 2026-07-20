@@ -7,7 +7,7 @@ pipeline change with:*
 uv run python -m scripts.generate_pipeline_report
 ```
 
-*Generated 2026-07-20 15:33 UTC from commit `5b2e6c8`.*
+*Generated 2026-07-20 22:19 UTC from commit `8117738`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -130,3 +130,31 @@ be measuring the scan grid. Road widths are measured from OSM centerlines by
 The colour test and morphology that used to sit here were removed after being measured: the colour
 test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
 step after it moved the boundary a width would be taken from.
+
+## 10. Carriageway-to-bike-lane gap
+
+- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
+  the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
+  `README.md`
+- **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask on the left of step 9 is
+  quantised to 4.4 m blocks. A cross-section cut from the pixels locates each edge subpixel (measured
+  precision ~0.08 m on this tile) where the mask cannot resolve the feature at all
+- **OSM as scaffold only:** street/lane centerlines say *where* to cut and which way to face; every
+  edge, width and gap is read off pixels
+- **Colour:** each lane segment coloured by the gap to the carriageway; **0 m** (light blue) is a
+  measured result -- the lane is flush with or painted on the road, with no separating strip -- not a
+  blank. Grey is shadow, the only genuinely unmeasurable case
+
+![bikelane gap](figures/10_bikelane_gap.png)
+
+**On this frame:** 31 of 31 cross-sections measured, 0 in
+shadow; median gap 0.00 m, and 81% with no separating strip
+at all (14 contiguous, 11 abutting, 3 bright/marking, 2 asphalt, 1 red paint). That most lanes read 0 m is the real picture of the district: most cycling
+infrastructure here is painted onto or flush with the carriageway. A gap only opens up where a verge,
+buffer or paved strip physically separates the two -- those are the coloured stretches.
+
+**`contiguous` is "no separating strip detected", not a certified zero.** A paint line fainter than
+`MARKING_MIN_EXCESS`, or a low-contrast material change, would be missed and also land at 0 m. The
+`composition` field keeps the distinction (`contiguous` = no boundary found, vs `abutting` = boundary
+found with zero strip) so it can be audited; putting an error bar on it would need ground-truth
+cross-sections.

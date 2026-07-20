@@ -3,80 +3,47 @@
 PARKED -- NOT WIRED INTO ANYTHING. Kept because the machinery is sound and
 the failure is understood, not because it works. Nothing imports this.
 
-Status, so this can be picked up without re-deriving it:
+Status, so this can be picked up without re-deriving it: the dynamic program,
+smoothness coupling, CNN reach bound and unobserved-pixel handling all behave
+as intended. The *evidence function* is what stops it -- `_roadness` measures
+similarity to a reference sampled at the centerline, so similarity falls off
+monotonically outward and the inside-vs-outside step scores positive almost
+immediately, biasing every fit narrow (5.35 m median where these streets run
+~9 m, 13 of 43 ways pinned at the minimum half-width). Likely fixes, untested:
+anchor the reference off the centerline (the CNN mask interior), or replace
+the difference of means with a scale-aware two-sample statistic. Already
+disproven: that the prefilter's buffer masking was the limiter -- against raw
+unmasked .jp2 imagery the median was identical (5.35 m).
 
-- The dynamic program, the smoothness coupling, the CNN reach bound and the
-  unobserved-pixel handling all behave as intended.
-- The *evidence function* is wrong, and that is what stops it. `_roadness`
-  measures similarity to a reference sampled at the centerline, so
-  similarity falls off monotonically as a ray moves outward, and the
-  inside-vs-outside step therefore scores positive almost immediately. Every
-  fit is biased narrow as a result: on a 1500x1500 test region it returned a
-  median width of 5.35 m where these streets run about 9 m, with 13 of 43
-  ways pinned at the minimum admissible half-width.
-- Likely fixes, untested: anchor the reference somewhere other than the
-  centerline (the CNN mask interior, say), or replace the difference of
-  means with a scale-aware two-sample statistic so a shallow monotonic
-  decline cannot outscore a real step.
-- One hypothesis already tested and *disproven*: that the prefilter's buffer
-  masking was the limiter. Running the fit against raw unmasked .jp2 imagery
-  instead gave an identical median of 5.35 m. The buffer is not the problem.
+Three real bugs were found and fixed on the way, all preserved below: the
+inner comparison band reaching across the centerline, the fit locking onto
+the prefilter's mask boundary at 2x the buffer radius, and unmeasurable
+stretches silently collapsing to the minimum offset instead of reporting
+nothing.
 
-Three real bugs were found and fixed while getting this far, all preserved
-below: the inner comparison band reaching across the centerline into the
-opposite side, the fit locking onto the prefilter's own mask boundary at
-exactly 2x the buffer radius, and unmeasurable stretches silently collapsing
-to the minimum offset instead of reporting nothing.
+Unlike every earlier width method here, this never binarises (a colour
+threshold + morphology chain is where their error was -- the colour test
+alone discarded two thirds of its input into 138 fragments, each cleanup step
+moving the boundary). It works directly on the imagery and fits both edges as
+a pair along the entire way at once.
 
-Every earlier width method in this project measured a *binary mask*: a
-colour threshold turned pixels into road/not-road, morphology cleaned up the
-result, and the width was read off whatever shape survived. That chain is
-where the error was. On the representative frame the colour test alone
-discarded two thirds of its input and broke the rest into 138 fragments, and
-each cleanup step after it moved the boundary that the width is measured
-from.
+Why jointly: finding an edge independently per cross-section fails here.
+Sampling luminance across one carriageway, the strongest gradient sat in the
+*middle* of the road -- a lane marking; cars and markings routinely beat the
+kerb's local gradient. What separates a real edge from a marking is
+consistency along the road, so the fit maximises edge evidence summed along
+the way minus a penalty for the offset changing between samples, solved
+exactly by dynamic programming over discretised offsets -- an isolated strong
+response can't win, since taking it forces a large offset jump on both sides.
 
-This module never binarises. It works directly on the imagery, and it fits
-both edges of a road as a pair, along the entire way at once, rather than
-finding them independently at each cross-section.
-
-Why jointly, rather than per cross-section
-------------------------------------------
-Finding an edge independently at each sample does not work here, and that
-was measured rather than assumed. Sampling luminance across one real
-carriageway and looking for the strongest gradient produced seven candidate
-edges, and the strongest of them (3.57) sat in the *middle* of the road,
-not at either edge -- it was a lane marking. Cars and markings routinely
-produce a stronger local gradient than the kerb does.
-
-What separates a real edge from a lane marking is not its strength at one
-point, it is consistency along the road: a kerb runs the length of the way
-at a near-constant offset, a marking does not survive as a coherent
-boundary. So the fit maximises edge evidence summed along the way, minus a
-penalty for the offset changing between neighbouring samples, and solves it
-exactly by dynamic programming over discretised offsets. A strong but
-isolated response cannot win, because committing to it forces a large
-offset jump on both sides.
-
-What counts as edge evidence
-----------------------------
-Not a gradient. A gradient peaks at any local change, which is exactly the
-failure above. Instead each candidate offset is scored as a *step*: how much
-more road-like the imagery is inside that offset than just outside it (see
-`_edge_evidence`). "Road-like" is similarity to a reference sampled from the
-imagery near the centerline itself, over R, G, B and near-infrared together,
-so no fixed colour is assumed and the reference adapts to each way.
-
-That construction is what rejects a lane marking directly rather than by
-smoothing it away: the marking is bright, but the surface beyond it is road
-again, so the inside-vs-outside contrast across it is small. At the true
-kerb the contrast stays large, because what lies beyond really is a
-different surface.
-
-Near-infrared carries real weight here. It is the one band the pipeline has
-always computed and no detector has ever read, and it separates paving from
-vegetation and verge far better than RGB does -- which is what a road edge
-usually borders on.
+Edge evidence is a *step*, not a gradient (which peaks at any change): how
+much more road-like the imagery is inside a candidate offset than just
+outside it (`_edge_evidence`). "Road-like" is similarity to a reference
+sampled near the centerline over R, G, B and near-infrared, so no fixed
+colour is assumed. This rejects a lane marking directly -- the road resumes
+on its far side, so the contrast across it is small, while at a real kerb it
+stays large. Near-infrared carries real weight: the one band no detector ever
+read, it separates paving from the vegetation and verge a road edge borders.
 """
 
 from dataclasses import dataclass
@@ -85,65 +52,27 @@ import numpy as np
 from rasterio.transform import Affine
 from shapely.geometry import LineString
 
-# How far apart to fit cross-sections along a way. Finer than
-# centerline_width's 5 m sampling: the smoothness penalty needs neighbouring
-# samples close enough that a real edge genuinely varies little between them.
 SAMPLE_INTERVAL_M = 2.0
 
-# Largest half-width the fit will consider, and the step it discretises to.
-# The step sets the resolution of the answer, so it is well below a pixel;
-# the DP cost is linear in the number of offsets, so this is affordable.
 MAX_HALF_WIDTH_M = 12.0
 OFFSET_STEP_M = 0.1
 
-# Half-widths below this are not considered at all -- a fit that collapsed
-# onto the centerline would score well on any uniform surface.
 MIN_HALF_WIDTH_M = 1.0
 
-# Width of the band just outside a candidate edge that gets compared against
-# the road interior. Wide enough to see past a kerb and a gutter into
-# whatever the road actually borders, narrow enough not to reach across a
-# footway into a hedge.
 OUTER_BAND_M = 2.0
 
-# How far in from a candidate edge to average the interior. Capped so a wide
-# road is judged on the surface near its edge rather than diluted by the
-# whole carriageway.
 INNER_BAND_M = 2.5
 
-# Penalty weight on the half-width changing between neighbouring samples,
-# per meter of change. This is the parameter that makes the fit joint rather
-# than pointwise: at zero it degenerates into the per-sample gradient search
-# that the module docstring describes failing.
 SMOOTHNESS_WEIGHT = 3.0
 
-# Reference band sampled around the centerline to define "road-like" for
-# this way. Kept narrow so it is carriageway even on the narrowest street.
 REFERENCE_HALF_WIDTH_M = 1.0
 
-# How far past the coarse CNN mask's own extent the fit may still place an
-# edge. The mask is stamped in TEXTURE_WINDOW_PX blocks, so its boundary can
-# legitimately fall up to most of a window short of the real edge; without
-# some margin the fit would inherit the mask's 4.4 m quantisation, which is
-# the entire thing this module exists to avoid.
 REACH_MARGIN_M = 3.0
 
-# Penalty applied to a candidate beyond the CNN mask's reach. Far larger
-# than any real evidence value, so it is effectively a bound, but finite so
-# that a sample where the mask is missing entirely still degrades to "no
-# preference" rather than making the whole path unscoreable.
 OUT_OF_REACH_PENALTY = 1000.0
 
-# Fraction of a comparison band that must be real imagery for that band to
-# count. Below this the band is mostly prefilter background and any step
-# across it is an artefact of the mask, not a surface boundary.
 MIN_OBSERVED_FRACTION = 0.6
 
-# Smallest inside-vs-outside step that counts as having located an edge.
-# Roadness is scaled in per-band standard deviations of the road surface
-# itself, so this is "the surface outside differs by a quarter of the
-# variation seen on the road" -- low, because it only has to separate a real
-# boundary from flat evidence, not grade how good one is.
 MIN_EDGE_EVIDENCE = 0.25
 
 
@@ -154,19 +83,17 @@ class RibbonFit:
     distance_along_m: np.ndarray
     left_m: np.ndarray
     right_m: np.ndarray
-    evidence: np.ndarray  # per-sample edge evidence, summed over both sides
-    measured: np.ndarray  # bool: an edge was actually found, on both sides
+    evidence: np.ndarray
+    measured: np.ndarray
 
     @property
     def width_m(self) -> np.ndarray:
         """Fitted width per sample, NaN where no edge was found.
 
-        NaN rather than a number, deliberately. Where the evidence is flat
-        the dynamic program still has to return *something*, and what it
-        returns is the smallest admissible offset -- so an unmeasurable
-        stretch would otherwise be indistinguishable from a genuinely narrow
-        road. Reporting nothing there is the honest outcome; the caller
-        drops those samples.
+        NaN, not a number: where evidence is flat the DP still returns the
+        smallest admissible offset, so an unmeasurable stretch would otherwise
+        be indistinguishable from a genuinely narrow road. The caller drops
+        those samples.
         """
         return np.where(self.measured, self.left_m + self.right_m, np.nan)
 
@@ -210,18 +137,13 @@ def _sample_profiles(
 def _mark_unobserved(profiles: np.ndarray) -> np.ndarray:
     """NaN out pixels the prefilter masked away, so they are never read as surface.
 
-    This is load-bearing, not hygiene. The prefiltered imagery is zeroed
-    outside the OSM buffer, which puts a perfectly sharp, perfectly straight
-    edge at exactly STREET_BUFFER_METERS from every centerline -- by far the
-    strongest step anywhere in the scene, and an artefact of the pipeline
-    rather than anything on the ground. Left in, the fit locks onto it and
-    reports 2 x the buffer radius as the road width: measured on a test
-    region, way after way came back at 12.00-12.10 m against a 6.0 m buffer.
-
-    Treated as unobserved instead, a candidate whose outer band is all
-    background yields no contrast either way, so the fit is neither drawn to
-    the buffer edge nor pushed off it -- it simply has nothing to go on out
-    there, which is the truth.
+    Load-bearing, not hygiene. The prefiltered imagery is zeroed outside the
+    OSM buffer, putting a perfectly sharp edge at exactly STREET_BUFFER_METERS
+    from every centerline -- the strongest step in the scene, a pipeline
+    artefact. Left in, the fit locks onto it and reports 2x the buffer radius
+    as the width (12.00-12.10 m against a 6.0 m buffer on a test region).
+    Treated as unobserved, an all-background outer band yields no contrast
+    either way, so the fit has nothing to go on out there -- which is the truth.
     """
     unobserved = (profiles == 0).all(axis=2)
     profiles = profiles.copy()
@@ -244,10 +166,6 @@ def _roadness(profiles: np.ndarray, offsets_m: np.ndarray) -> np.ndarray:
         return np.full(profiles.shape[:2], np.nan, dtype=np.float32)
 
     reference = np.median(reference_pixels, axis=0)
-    # Scale each band by its own spread near the centerline, so a band that
-    # is naturally noisy on road surface doesn't dominate the distance, and
-    # near-infrared gets weighted on its real discriminating power rather
-    # than its raw magnitude.
     spread = np.maximum(reference_pixels.std(axis=0), 1.0)
     distance = np.sqrt((((profiles - reference) / spread) ** 2).mean(axis=2))
     return -distance
@@ -265,10 +183,6 @@ def _edge_evidence(roadness: np.ndarray, offsets_m: np.ndarray, candidates_m: np
     signed_offsets = offsets_m * side
 
     for k, candidate_m in enumerate(candidates_m):
-        # The inner band is clamped to this side of the centerline. Without
-        # that, a candidate narrower than INNER_BAND_M reaches across the
-        # centerline and averages in the *opposite* side's surface, which
-        # made narrow candidates score on pixels they don't cover.
         inner = (signed_offsets > max(0.0, candidate_m - INNER_BAND_M)) & (signed_offsets <= candidate_m)
         outer = (signed_offsets > candidate_m) & (signed_offsets <= candidate_m + OUTER_BAND_M)
         if not inner.any() or not outer.any():
@@ -276,10 +190,6 @@ def _edge_evidence(roadness: np.ndarray, offsets_m: np.ndarray, candidates_m: np
         with np.errstate(invalid="ignore"):
             inner_mean = np.nanmean(roadness[:, inner], axis=1)
             outer_mean = np.nanmean(roadness[:, outer], axis=1)
-            # A band that is mostly unobserved cannot support a step either
-            # way. Requiring most of both bands to be real is what keeps the
-            # fit off the prefilter's own mask boundary (see
-            # `_mark_unobserved`), where the outer band is background.
             inner_seen = (~np.isnan(roadness[:, inner])).mean(axis=1)
             outer_seen = (~np.isnan(roadness[:, outer])).mean(axis=1)
         step = np.nan_to_num(inner_mean - outer_mean, nan=0.0)
@@ -320,18 +230,14 @@ def _reach_limit_m(
 ) -> np.ndarray:
     """How far out the CNN road mask reaches, per sample, on one side.
 
-    This is what stops the fit walking off the carriageway onto whatever
-    paving adjoins it. The imagery alone cannot tell a carriageway from the
-    bike lane, footway and car park it borders -- measured on the
-    representative frame, the raw evidence on that side peaks at 11.9 m
-    half-width, out at the far edge of the paving, because "road-like" never
-    stops being true in between. The CNN discriminant does separate those
-    surfaces, just coarsely, so it is used for exactly that: bounding how
-    far the search may go, never for locating the edge within it.
-
-    A margin past the mask's own extent is allowed, since the mask is
-    stamped in whole scan windows and its edge can sit up to a window short
-    of the real one.
+    This stops the fit walking off the carriageway onto adjoining paving. The
+    imagery alone cannot tell a carriageway from the bike lane, footway and
+    car park it borders -- raw evidence peaks at 11.9 m half-width out at the
+    far edge of the paving, because "road-like" never stops being true in
+    between. The CNN discriminant separates those surfaces coarsely, so it is
+    used only to bound how far the search may go, never to locate the edge. A
+    margin past the mask's extent is allowed, since the mask is stamped in
+    whole scan windows and can sit a window short of the real edge.
     """
     signed_offsets = offsets_m * side
     limits = np.full(surface_profile.shape[0], candidates_m[-1], dtype=np.float32)
@@ -341,9 +247,6 @@ def _reach_limit_m(
             limits[i] = MIN_HALF_WIDTH_M
             continue
         limits[i] = float(signed_offsets[on_surface].max()) + REACH_MARGIN_M
-    # Never below the smallest candidate: a sample whose limit fell under it
-    # would have no admissible offset at all, and the DP would be choosing
-    # among equally impossible options.
     return np.maximum(limits, candidates_m[0])
 
 
@@ -385,9 +288,6 @@ def fit_ribbon(
         evidence = _edge_evidence(roadness, offsets_m, candidates_m, side)
         if surface_profile is not None:
             limits = _reach_limit_m(surface_profile, offsets_m, candidates_m, side)
-            # A large finite penalty rather than -inf: the DP compares sums
-            # across samples, and -inf would poison a whole path rather than
-            # just making one offset unattractive at one sample.
             evidence = np.where(candidates_m[None, :] <= limits[:, None], evidence, evidence - OUT_OF_REACH_PENALTY)
         solved[side] = _solve_dp(evidence, candidates_m)
         evidences[side] = evidence
@@ -400,9 +300,6 @@ def fit_ribbon(
             for i in range(len(distances_m))
         ]
     )
-    # A sample counts as measured only if both sides produced a real step.
-    # Where a side's evidence is flat, the DP's answer there is an artefact
-    # of having to choose, not a located edge.
     measured = np.array(
         [
             evidences[-1][i].max() >= MIN_EDGE_EVIDENCE and evidences[+1][i].max() >= MIN_EDGE_EVIDENCE

@@ -18,7 +18,7 @@ import numpy as np
 class Detection:
     """A single detected instance."""
 
-    mask: np.ndarray  # (H, W) bool, aligned to the input chip image
+    mask: np.ndarray
     score: float
     label: str
 

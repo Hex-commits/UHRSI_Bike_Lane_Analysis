@@ -17,7 +17,7 @@ from scripts.tiles import find_tile_paths, union_bounds
 
 
 def main():
-    detector = YoloSegDetector()  # the only place a concrete model is referenced
+    detector = YoloSegDetector()
 
     tile_paths = find_tile_paths(DETECTION_INPUT_DIR, pattern="*.tif")
     print(f"Found {len(tile_paths)} tiles in {DETECTION_INPUT_DIR}")

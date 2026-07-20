@@ -1,23 +1,18 @@
 """Sliding-window surface-texture detector: frozen CNN embeddings, no training.
 
-Scans an image with a small window (matching the reference crop size),
-scores each window via texture_embedding.discriminant_score, and keeps the
-ones on the positive side of the discriminant. Windows are batched through
-the frozen backbone (~28 ms/image on this machine's MPS backend regardless
-of batch size -- batching didn't reduce per-image cost for this model, but
-still avoids redundant Python overhead).
+Scans an image with a small window (the reference crop size), scores each via
+texture_embedding.discriminant_score, and keeps those on the positive side of
+the discriminant. Windows are batched through the frozen backbone.
 
-One class, two configurations: which surface is being looked for is just a
-choice of positive/negative reference labels (config.py's
-BIKE_LANE_TEXTURE_LABELS / ROAD_TEXTURE_LABELS), so `bike_lane_detector()`
-and `road_detector()` below are the same scan with a different discriminant
-direction. The two have separate thresholds because their score
-distributions are not comparable -- see ROAD_SCORE_THRESHOLD.
+Which surface is looked for is just a choice of positive/negative reference
+labels (config.py's BIKE_LANE_TEXTURE_LABELS / ROAD_TEXTURE_LABELS), so
+`bike_lane_detector()` and `road_detector()` are the same scan with a
+different discriminant direction. They have separate thresholds because their
+score distributions aren't comparable -- see ROAD_SCORE_THRESHOLD.
 
-This is not fast: a full 5000x5000 tile has far more windows than makes
-sense to scan in one sitting on this hardware (a single 640x640 chip alone
-means ~3000 windows at 50% stride). Meant for scanning a bounded
-region-of-interest, not batch-processing whole tiles end to end.
+Not fast: a full 5000x5000 tile has far more windows than makes sense in one
+sitting (a single 640x640 chip is ~3000 windows at 50% stride). Meant for a
+bounded region-of-interest, not whole tiles end to end.
 """
 
 from collections.abc import Callable, Sequence
@@ -37,35 +32,8 @@ from scripts.texture_embedding import discriminant_direction, embed_batch, load_
 
 BATCH_SIZE = 64
 
-# Calibrated from this session's validation crops, not guessed: every genuine
-# lane-paint crop tested scored +0.16 to +0.25; every clean negative scored
-# <= -0.10; the one edge case (a partially-shadowed rooftop) scored +0.042,
-# still below the lowest lane score. 0.10 sits strictly between the highest
-# validated negative and the lowest validated positive, so it also happens
-# to fix that edge case as a side effect. The old default (0.0) let a lot of
-# plain street through, since much of it still scored weakly positive.
 SCORE_THRESHOLD = 0.10
 
-# Calibrated separately from SCORE_THRESHOLD above, and NOT transferable
-# from it: the road discriminant's whole score distribution sits higher,
-# because almost everything inside the prefiltered buffer is pavement of
-# some kind and so scores on the road side of a road-vs-rest split. On the
-# representative frame (tile 404_5757, x=4300 y=1330 w=700 h=180), scored
-# against the tile's own classification band, carriageway pixels have median
-# score +0.177 and bike-lane-buffer pixels +0.114 -- overlapping
-# distributions, not separated ones. Sweeping the threshold over that frame,
-# Youden's J peaks at 0.14 (72.7% of carriageway retained, 33.7% of
-# bike-lane buffer wrongly retained); the bike-lane threshold of 0.10 would
-# have retained 60.5% of the bike-lane buffer as road.
-#
-# Raised from 0.14 (Youden's J optimum on that frame) deliberately. J
-# balances recall against false positives as if both cost the same, and here
-# they do not: this mask is no longer refined by a pixel-precise colour test
-# afterwards, so anything it wrongly includes goes straight into the road
-# surface. Trading recall for precision at 0.18 cuts the false-positive rate
-# from 33.7% to 15.1% for 72.7% -> 48.1% recall. Missing a stretch of road
-# leaves a coverage gap, which is visible; including a car park invents a
-# road, which is not.
 ROAD_SCORE_THRESHOLD = 0.18
 
 

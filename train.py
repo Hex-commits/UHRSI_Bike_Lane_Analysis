@@ -24,9 +24,6 @@ def main():
     )
     print(f"Classes: {class_names}")
 
-    # project/name/exist_ok pin the output to YOLO_SEG_TRAINED_WEIGHTS_PATH's
-    # parent dirs, instead of ultralytics' default of incrementing
-    # runs/segment/train2, train3, ... on every re-run.
     run_dir = YOLO_SEG_TRAINED_WEIGHTS_PATH.parent.parent.parent
     run_name = YOLO_SEG_TRAINED_WEIGHTS_PATH.parent.parent.name
 

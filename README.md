@@ -93,6 +93,8 @@ runs/             # ultralytics training output, incl. trained weights (not in g
 - `detection/width.py` — `measure_width_m`: skeletonize + distance transform. Bike lanes only; it does not generalize to roads (see Road detection below)
 - `detection/centerline_width.py` — width measured by casting rays perpendicular to a known OSM centerline, the only method that survives tile scale (see Road detection below)
 - `detect_roads.py` — orchestrator for a whole-tile road run: coarse CNN scan → per-OSM-way width, writing a GeoPackage, a width-coloured map and the cached surface mask
+- `detection/cross_section.py` — measures a road profile in 1-D, at the imagery's own 0.2 m resolution: subpixel edge location on illumination-invariant features, plus a separate narrow-bright-line detector for painted markings the material gradient cannot see (see Bike-lane gap below)
+- `measure_bikelane_gap.py` — orchestrator for the gap between carriageway and bike lane: cuts a cross-section from road centerline to lane, reads both edges from pixels, writes a GeoPackage and a lane-coloured map (see Bike-lane gap below)
 - `detection/ribbon_fit.py` — **parked, imported by nothing.** Joint two-edge fit against continuous imagery; the machinery works, the evidence function is biased narrow (see Road detection below)
 - `detection/rasterize.py` — burns a numeric field (score, width_mean_m, ...) from the detections into a GeoTIFF aligned to the source tile grid, plus a colorized PNG preview (raw single-band GeoTIFFs render as flat grayscale in a plain image viewer without one)
 
@@ -358,9 +360,46 @@ The coarse discriminant is still too weak to tell carriageway from other large p
 
 The widths themselves are also only as good as the traced surface they are measured against, and that surface comes from a colour threshold plus morphological cleanup. Where a way's `unbounded_fraction` is high, the ray never found an edge and the width is a lower bound, not a measurement.
 
+## Bike-lane gap (`measure_bikelane_gap.py`)
+
+The deliverable: for every point along a bike lane, how far is it from the carriageway beside it, in metres, shown on a map.
+
+```bash
+uv run python -m scripts.measure_bikelane_gap                    # whole tile, ~70 s
+uv run python -m scripts.measure_bikelane_gap 1600 1600 1600 1600  # one window: col row w h
+```
+
+Writes `data/detections/bikelane_gap.gpkg` (one LineString per cross-section, road point → lane point, with `gap_m`, `composition`, `shadow_fraction`, `reliable`) and `bikelane_gap_map.png` (the lane drawn over the imagery, coloured by gap).
+
+### Why 1-D, not the mask
+
+The 2-D route cannot do this, and the reason is resolution, not effort. The gap is 1.5–3 m; the coarse CNN mask is stamped in 22 px windows, so its edge is quantised to 4.4 m blocks (see "Road detection" — the mask "answers *is there road here*, not *where does it end*"). A 4.4 m ruler cannot measure a 2 m feature, and nothing geometric repairs a boundary that never carried the information — a buffer/union dissolve, a morphological opening and two shape filters were all tried against the road mask and all failed.
+
+The imagery is 0.2 m/px, so the information is in the pixels. `detection/cross_section.py` cuts a 1-D profile straight from them at a stated budget — 0.05 m sampling, 0.15 m smoothing, ~0.30 m two-edge separation limit, subpixel edge location by parabola fit. Measured edge precision on this tile is **0.08 m** (0.4× the pixel), against the mask's 4.4 m — the first ruler fine enough for the job. Edges are found on chromaticity + NDVI so a cast shadow (which scales all bands together) does not register as a material boundary.
+
+### OSM is a scaffold, nothing more
+
+OSM street/lane centerlines say *where* to cut a cross-section and which way to face it — the one thing this imagery cannot reliably supply, since the satellite-derived bike-lane mask's two densest regions on this tile are a shadow edge across a car park and a rooftop. Every measured number is read off pixels; no edge, width or gap comes from OSM geometry. Runs on the **raw** tiles, not the prefiltered ones: those are masked to an OSM buffer, which would put an artificial edge exactly where a lane's outer boundary sits.
+
+### Painted markings are a separate detector
+
+White paint on grey asphalt is almost purely a *brightness* change, and brightness is deliberately excluded from the edge detector (that is how shadows read). So the lane-edge line — the very thing marking a road/lane boundary — is invisible to it. `detect_markings` finds these separately as narrow bright spikes, told apart from a shadow step by shape: a shadow is a monotonic step, a marking is a symmetric spike flanked by darker asphalt on both sides, a few decimetres wide. On this tile it recovers 63 lane lines the gradient missed and sharpens edge precision from 0.09 to 0.08 m.
+
+### Reading the result
+
+A gap of **0 m is a measurement, not a blank**: `MIN_RUN_M = 0` formalises that two surfaces which touch are separated by exactly nothing. Where one continuous asphalt run spans road centerline and lane centerline with no boundary between them — no material change, and now that markings are detected, no paint line either — there is no separating strip, so the gap is 0. These are labelled `contiguous`; a boundary found with zero strip between is `abutting`. On this tile **88% of measured lanes have no separating strip** (median gap 0.00 m), which is the real picture of the district: most cycling infrastructure is painted onto or flush with the carriageway. The coloured 0.25–2 m stretches are where a verge, buffer or paved strip actually separates them.
+
+Two honest limits:
+
+- **`contiguous` means "no separating strip *detected*"**, not a metrology-grade zero — a paint line fainter than `MARKING_MIN_EXCESS` could still be missed and land here as 0. The `composition` field preserves the distinction (`contiguous` = no boundary at all, vs `abutting` = boundary found, zero strip) so it can be audited.
+- **Grey on the map is shadow only** (~2% of the tile). Shadow correction leaves a residual false edge at the shadow boundary, so cross-sections within 3 m of one are dropped rather than trusted; `reliable=False` marks them.
+
+The small composition classes are not yet trustworthy at these counts: `vegetation` at a 9 m "gap" is a park strip or a mis-paired road, not a lane separator, and `red paint` is suspect on imagery where red clay roof tiles dominate the redness index and the lanes are not red-painted. Only `contiguous`, `abutting`, `bright/marking` and `asphalt` have the counts to mean anything.
+
 ## Known limitations
 
 - **OSM gaps** — bike lane mapping stops abruptly where OSM data is incomplete, not where the lane physically ends. Including streets alongside dedicated lanes covers most of this.
 - **Buffer bleeds onto buildings** — in dense blocks, narrow streets mean the buffer overlaps adjacent rooftops. `BIKE_LANE_BUFFER_METERS`/`STREET_BUFFER_METERS` were narrowed (6.0/8.0 → 4.5/6.0) to reduce this, but it's a mitigation, not a fix — still happens in tight blocks. The actual fix would be subtracting OSM building footprints from the buffer.
 - **Shadow correction is statistical, not physical** — brightens using nearby sunlit pixels, doesn't reconstruct real detail in deep shadow, no sun-angle/DSM data involved. Mainly, because we don't have the data for it.
+- **Gap `contiguous` cannot certify a true zero** — the bike-lane gap reads 0 m wherever no separating strip is detected between carriageway and lane. That is correct for a lane painted on or flush with the road, but a paint line fainter than `MARKING_MIN_EXCESS` or a low-contrast material change would be missed and also land at 0. The measurement says "nothing separates them that the imagery can see", not "they physically touch"; ground-truth cross-sections would be needed to put an error bar on it.
 - **YOLO only sees RGB** — `detection/tiling.py` and `detection/dataset.py` both read bands `[1, 2, 3]` only, so the infrared band (and the classification/shadow bands) are computed but never reach the model. CoCo-Weights are being used, they are expecting 3 bands and not more. Adding infrared would mean a 4-channel first conv layer (losing direct compatibility with the pretrained RGB checkpoint's weights for that layer) and a custom dataset loader, since chips are currently exported as plain 3-channel PNGs. Not attempted yet.
