@@ -233,14 +233,22 @@ Every stage below runs on the same fixed example region:
 - **Detector:** `road_detector()` + `RoadEdgeDetector` -- the CNN discriminant at
   `ROAD_SCORE_THRESHOLD` (0.18) and nothing else
 - **Left:** RGB
-- **Middle / right:** *identical* on this frame, and that is the point. The road pipeline no longer
-  has a pixel-precise stage: the middle panel is the coarse mask, the right one is the same mask with
-  isolated specks dropped, and here nothing was small enough to drop -- 57,596 px in both
+- **Middle:** the raw coarse mask, before shadow is cut
+- **Right:** the road surface -- the same mask with shadowed pixels removed. The difference is the
+  scatter of blocks across the dark carriageway on the left, which the coarse detector claimed and
+  which cannot be verified either way
 
 ![road surface](figures/09_road_trace.png)
 
-Note the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows, so
-its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
+**Shadow is cut, not kept.** In deep shadow this imagery carries almost no surface information:
+shadowed carriageway and shadowed non-carriageway measure the same to within noise (median hue
+distance from red 0.405 vs 0.405, saturation 0.506 vs 0.519), and a discriminant fitted and scored
+on the very same pixels still misclassifies 35%. Anything marked road there is close to a coin
+flip, so it is removed along with a 5 px penumbra margin. On this frame that cut 20% of the road
+surface; across the whole tile, 13%. That converts a silent error into a visible coverage gap.
+
+Note also the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows,
+so its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
 directly, and it is why widths measured against this surface come out biased wide.
 
 **Surface found on this frame:** {road_surface_px:,} px across {road_components} component(s).

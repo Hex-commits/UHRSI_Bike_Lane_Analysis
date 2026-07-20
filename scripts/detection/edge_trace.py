@@ -179,6 +179,14 @@ BRIDGE_ALIGNMENT_COS_MIN = 0.82
 BRIDGE_TANGENT_LOOKBACK_POINTS = 5
 
 
+# How far past the detected shadow mask the road surface is also cut, in
+# pixels (5 px = 1.0 m at this imagery's 0.2 m/px, matching prefiltering's
+# SHADOW_CUT_MARGIN_M). Same reasoning: a real shadow edge is a soft
+# penumbra and the mask's Otsu threshold draws a hard line through it, so
+# pixels just outside the mask still read as partially shadowed and are no
+# more classifiable than the ones inside it.
+SHADOW_EXCLUSION_MARGIN_PX = 5
+
 # A road is an order of magnitude wider than a lane (~6-7 m of carriageway
 # vs ~2 m), so the "too small to be real" floor scales with it: 200 px at
 # 0.2 m/px is 8 m^2, about the footprint of a single car, below which a
@@ -422,9 +430,11 @@ class RoadEdgeDetector:
     def __init__(self, coarse_detector: TextureEmbeddingDetector | None = None):
         self._coarse = coarse_detector or road_detector()
 
-    def predict(self, image: np.ndarray, coarse: list[Detection] | None = None) -> list[Detection]:
+    def predict(
+        self, image: np.ndarray, coarse: list[Detection] | None = None, shadow: np.ndarray | None = None
+    ) -> list[Detection]:
         """One Detection per connected component of the road surface."""
-        mask = self.surface_mask(image, coarse)
+        mask = self.surface_mask(image, coarse, shadow)
         if not mask.any():
             return []
         score = coarse[0].score if coarse else 0.0
@@ -434,17 +444,42 @@ class RoadEdgeDetector:
             for component_id in range(1, n_components + 1)
         ]
 
-    def surface_mask(self, image: np.ndarray, coarse: list[Detection] | None = None) -> np.ndarray:
-        """The road surface: the thresholded CNN mask, with isolated specks dropped.
+    def surface_mask(
+        self, image: np.ndarray, coarse: list[Detection] | None = None, shadow: np.ndarray | None = None
+    ) -> np.ndarray:
+        """The road surface: the thresholded CNN mask, minus shadow, with specks dropped.
 
-        The small-component filter is the one piece of cleanup kept, and it
-        is close to a no-op by design -- ROAD_MIN_COMPONENT_AREA_PX (200 px)
-        is well under a single scan window's 484 px footprint, so it only
-        removes fragments left where a window was clipped by the tile edge
-        or by the prefilter's own mask.
+        `shadow` is the prefiltered tile's own shadow band (band 6), and
+        where it is set the surface is cut. This is not a cosmetic filter.
+        In deep shadow this imagery carries almost no surface information at
+        all: shadowed carriageway and shadowed non-carriageway measure the
+        same to within noise -- median hue distance from red 0.405 vs 0.405,
+        median saturation 0.506 vs 0.519, mean RGB (44,60,81) vs (41,57,79)
+        -- and fitting a discriminant on those pixels and scoring it on the
+        very same pixels still misclassifies 35%, against 20% for the
+        equivalent sunlit comparison. Whatever the detector marks as road
+        inside shadow is therefore close to a coin flip, and cutting it
+        turns a silent error into an honest coverage gap.
+
+        The cut extends SHADOW_EXCLUSION_MARGIN_PX past the detected mask for
+        the same reason `SHADOW_CUT_MARGIN_M` exists in prefiltering: a real
+        shadow edge is a soft penumbra, and the mask's Otsu threshold draws
+        a hard line through it, so pixels just outside still read as
+        partially shadowed.
+
+        The small-component filter runs last, since cutting shadow out of
+        the middle of a run of road is exactly what leaves fragments too
+        small to be meaningful.
         """
         if coarse is None:
             coarse = self._coarse.predict(image)
         if not coarse:
             return np.zeros(image.shape[:2], dtype=bool)
-        return remove_small_objects(coarse[0].mask.copy(), max_size=ROAD_MIN_COMPONENT_AREA_PX)
+
+        mask = coarse[0].mask.copy()
+        if shadow is not None:
+            excluded = shadow.astype(bool)
+            if SHADOW_EXCLUSION_MARGIN_PX > 0:
+                excluded = binary_dilation(excluded, iterations=SHADOW_EXCLUSION_MARGIN_PX)
+            mask &= ~excluded
+        return remove_small_objects(mask, max_size=ROAD_MIN_COMPONENT_AREA_PX)

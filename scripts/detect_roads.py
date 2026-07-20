@@ -48,6 +48,11 @@ from scripts.texture_analysis import SEGMENT_COLORS
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "detections"
 
+# Band index of the prefiltered tile's shadow mask (see "Output format" in
+# README). Shadowed pixels are cut from the road surface -- the detector
+# cannot classify them (see RoadEdgeDetector.surface_mask).
+SHADOW_BAND = 6
+
 # Long side of the overlay PNG. A 5000x5000 overlay at full resolution is a
 # ~75 MB image that no viewer opens comfortably, and roads are wide enough
 # to stay legible when downsampled this far.
@@ -85,6 +90,7 @@ def detect_roads(tile_path: Path, window: Window | None = None, stride_px: int =
     """
     with rasterio.open(tile_path) as src:
         image = np.transpose(src.read([1, 2, 3], window=window), (1, 2, 0))
+        shadow = src.read(SHADOW_BAND, window=window)
         transform = src.window_transform(window) if window is not None else src.transform
         bounds = src.window_bounds(window) if window is not None else src.bounds
         pixel_size_m = src.res[0]
@@ -100,8 +106,12 @@ def detect_roads(tile_path: Path, window: Window | None = None, stride_px: int =
     print(f"  coarse scan took {(time.time() - started) / 60:.1f} min; "
           f"mask covers {coarse[0].mask.mean():.0%} of frame")
 
-    surface = RoadEdgeDetector(coarse_detector=coarse_detector).surface_mask(image, coarse=coarse)
-    print(f"  traced road surface: {surface.sum():,} px ({surface.mean():.0%} of frame)")
+    detector = RoadEdgeDetector(coarse_detector=coarse_detector)
+    before_shadow = detector.surface_mask(image, coarse=coarse)
+    surface = detector.surface_mask(image, coarse=coarse, shadow=shadow)
+    cut = before_shadow.sum() - surface.sum()
+    print(f"  road surface: {surface.sum():,} px ({surface.mean():.0%} of frame); "
+          f"shadow exclusion cut {cut:,} px ({cut / max(before_shadow.sum(), 1):.0%})")
 
     # Width comes from OSM centerlines rather than the mask's own shape --
     # see detection/centerline_width.py for why that's necessary at tile

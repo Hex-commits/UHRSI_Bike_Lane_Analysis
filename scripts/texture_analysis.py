@@ -188,12 +188,19 @@ def visualize_edge_trace(
     with rasterio.open(tile_path) as src:
         rgb = src.read([1, 2, 3], window=window)
         pixel_size_m = src.res[0]
+        # Band 6 is the shadow mask; roads are cut where it is set, since the
+        # detector cannot classify shadowed surface (see RoadEdgeDetector).
+        shadow = src.read(6, window=window) if surface == "road" and src.count >= 6 else None
     image = np.transpose(rgb, (1, 2, 0))
 
     coarse_detections = coarse_detector.predict(image)
     coarse_mask = coarse_detections[0].mask if coarse_detections else np.zeros(image.shape[:2], dtype=bool)
 
-    edge_detections = edge_detector.predict(image, coarse=coarse_detections)
+    edge_detections = (
+        edge_detector.predict(image, coarse=coarse_detections, shadow=shadow)
+        if surface == "road"
+        else edge_detector.predict(image, coarse=coarse_detections)
+    )
     traced_mask = np.zeros(image.shape[:2], dtype=bool)
     for detection in edge_detections:
         traced_mask |= detection.mask
