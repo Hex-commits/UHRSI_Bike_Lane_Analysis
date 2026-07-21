@@ -1,27 +1,3 @@
-"""Measure a surface's width by casting rays perpendicular to a known centerline.
-
-width.py infers a direction from the mask itself (medial axis, or PCA), which
-breaks down at tile scale because traced pavement connects into networks: a
-T-junction has no dominant axis, so PCA returns something diagonal and the
-"width" is measured across the junction. On one 300x300 m test region that
-gave a 28 m road (a T-junction) and a 55 m road (a parking lot).
-
-Here the direction comes from OSM's road centerlines instead (already fetched
-and cached by `scripts/osm_features.py`). Per sampled point along a way, the
-local tangent gives a perpendicular, and the width is how far the traced
-surface extends along it in each direction. This fixes three things: junctions
-stop mattering (each way is measured as its own unit); surfaces with no
-centerline are never measured, so pavement the discriminant wrongly picked up
-doesn't become a road unless OSM says one is there; and results key to OSM
-ways, so a width joins back to that way's tags.
-
-This is *not* the rejected idea of using the OSM buffer as a region of
-interest -- the ray stops where the traced asphalt stops. The buffer does
-bound how far a ray can reach (the prefiltered imagery is masked to it), so
-`buffer_limited` flags any sample that ran into that edge rather than a real
-surface boundary, keeping a clipped measurement visible.
-"""
-
 from dataclasses import dataclass
 
 import numpy as np

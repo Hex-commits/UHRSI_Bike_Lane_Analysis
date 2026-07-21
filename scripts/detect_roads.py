@@ -17,6 +17,12 @@ is chunked, by batch, inside the detector. The cost is time not memory -- the
 scan dominates (a 5000x5000 tile took 23 min at the default stride, ~1/stride^2)
 so the surface mask is cached alongside the results, letting a re-render or
 re-measure skip the scan.
+
+With config.USE_OSM_ROAD_FALLBACK set, the CNN scan is skipped entirely and the
+road surface is instead assumed from OSM: each street is buffered to a default
+width for its highway class (detection/osm_road_surface.py). Everything
+downstream is identical, but a way's reported width is then the assumed default,
+not a measurement -- a coverage fallback for when detection underperforms.
 """
 
 import sys
@@ -31,9 +37,10 @@ from PIL import Image, ImageDraw
 from rasterio.windows import Window
 from shapely.geometry import box
 
-from scripts.config import TEXTURE_STRIDE_PX, TILE_CRS
+from scripts.config import TEXTURE_STRIDE_PX, TILE_CRS, USE_OSM_ROAD_FALLBACK
 from scripts.detection.centerline_width import _iter_lines, aggregate, measure_along_centerline
 from scripts.detection.edge_trace import RoadEdgeDetector
+from scripts.detection.osm_road_surface import osm_road_surface
 from scripts.detection.texture_detector import road_detector
 from scripts.osm_features import fetch_osm_features
 from scripts.texture_analysis import SEGMENT_COLORS
@@ -69,56 +76,65 @@ def detect_roads(tile_path: Path, window: Window | None = None, stride_px: int =
     """
     with rasterio.open(tile_path) as src:
         image = np.transpose(src.read([1, 2, 3], window=window), (1, 2, 0))
-        shadow = src.read(SHADOW_BAND, window=window)
+        shadow = None if USE_OSM_ROAD_FALLBACK else src.read(SHADOW_BAND, window=window)
         transform = src.window_transform(window) if window is not None else src.transform
         bounds = src.window_bounds(window) if window is not None else src.bounds
         pixel_size_m = src.res[0]
 
     print(f"{tile_path.name}: {image.shape[1]}x{image.shape[0]} px at {pixel_size_m} m/px, stride {stride_px}")
 
-    coarse_detector = road_detector(stride_px=stride_px)
-    started = time.time()
-    coarse = coarse_detector.predict(image, progress=lambda d, t: _progress(d, t, started))
-    if not coarse:
-        print("  coarse scan found nothing")
-        return [], image, np.zeros(image.shape[:2], dtype=bool)
-    print(f"  coarse scan took {(time.time() - started) / 60:.1f} min; "
-          f"mask covers {coarse[0].mask.mean():.0%} of frame")
-
-    detector = RoadEdgeDetector(coarse_detector=coarse_detector)
-    before_shadow = detector.surface_mask(image, coarse=coarse)
-    surface = detector.surface_mask(image, coarse=coarse, shadow=shadow)
-    cut = before_shadow.sum() - surface.sum()
-    print(f"  road surface: {surface.sum():,} px ({surface.mean():.0%} of frame); "
-          f"shadow exclusion cut {cut:,} px ({cut / max(before_shadow.sum(), 1):.0%})")
-
     osm = fetch_osm_features(bounds)
     streets = osm[osm.category == "street"].clip(box(*bounds))
     print(f"  {len(streets)} OSM street way(s) crossing this extent")
 
+    if USE_OSM_ROAD_FALLBACK:
+        surface = osm_road_surface(streets, transform, image.shape[:2])
+        print(f"  OSM road fallback: surface assumed from highway-class widths, no CNN scan -- "
+              f"{surface.sum():,} px ({surface.mean():.0%} of frame)")
+    else:
+        coarse_detector = road_detector(stride_px=stride_px)
+        started = time.time()
+        coarse = coarse_detector.predict(image, progress=lambda d, t: _progress(d, t, started))
+        if not coarse:
+            print("  coarse scan found nothing")
+            return [], image, np.zeros(image.shape[:2], dtype=bool)
+        print(f"  coarse scan took {(time.time() - started) / 60:.1f} min; "
+              f"mask covers {coarse[0].mask.mean():.0%} of frame")
+
+        detector = RoadEdgeDetector(coarse_detector=coarse_detector)
+        before_shadow = detector.surface_mask(image, coarse=coarse)
+        surface = detector.surface_mask(image, coarse=coarse, shadow=shadow)
+        cut = before_shadow.sum() - surface.sum()
+        print(f"  road surface: {surface.sum():,} px ({surface.mean():.0%} of frame); "
+              f"shadow exclusion cut {cut:,} px ({cut / max(before_shadow.sum(), 1):.0%})")
+
     records = []
-    for way in streets.itertuples():
-        samples = []
-        for line in _iter_lines(way.geometry):
-            samples.extend(measure_along_centerline(line, surface, transform, pixel_size_m))
-        width = aggregate(samples)
-        if width is None or width.n_samples < MIN_SAMPLES_PER_WAY:
-            continue
-        records.append(
-            {
-                "geometry": way.geometry,
-                "tile": tile_path.name,
-                "width_median_m": width.median_m,
-                "width_mean_m": width.mean_m,
-                "width_min_m": width.min_m,
-                "width_max_m": width.max_m,
-                "n_samples": width.n_samples,
-                "buffer_limited_fraction": width.buffer_limited_fraction,
-                "unbounded_fraction": width.unbounded_fraction,
-            }
-        )
-    records.sort(key=lambda r: -r["n_samples"])
-    print(f"  {len(records)} way(s) with at least {MIN_SAMPLES_PER_WAY} measurable cross-sections")
+    if USE_OSM_ROAD_FALLBACK:
+        print("  width not measured -- against an assumed class-width surface it would only echo the "
+              "assumption back; road surface written on its own")
+    else:
+        for way in streets.itertuples():
+            samples = []
+            for line in _iter_lines(way.geometry):
+                samples.extend(measure_along_centerline(line, surface, transform, pixel_size_m))
+            width = aggregate(samples)
+            if width is None or width.n_samples < MIN_SAMPLES_PER_WAY:
+                continue
+            records.append(
+                {
+                    "geometry": way.geometry,
+                    "tile": tile_path.name,
+                    "width_median_m": width.median_m,
+                    "width_mean_m": width.mean_m,
+                    "width_min_m": width.min_m,
+                    "width_max_m": width.max_m,
+                    "n_samples": width.n_samples,
+                    "buffer_limited_fraction": width.buffer_limited_fraction,
+                    "unbounded_fraction": width.unbounded_fraction,
+                }
+            )
+        records.sort(key=lambda r: -r["n_samples"])
+        print(f"  {len(records)} way(s) with at least {MIN_SAMPLES_PER_WAY} measurable cross-sections")
 
     overlay = image.astype(np.float32)
     color = np.array(SEGMENT_COLORS[0], dtype=np.float32)
@@ -194,7 +210,11 @@ def main() -> None:
     print(f"Wrote {surface_path}")
 
     if not records:
-        print("No road segments found.")
+        if USE_OSM_ROAD_FALLBACK:
+            print("OSM fallback: road surface written above; no width map or GeoPackage "
+                  "(width against an assumed class-width surface would only echo the assumption).")
+        else:
+            print("No road segments found.")
         return
 
     width_map_path = render_width_map(

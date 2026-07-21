@@ -38,12 +38,17 @@ def fetch_osm_features(
 ) -> gpd.GeoDataFrame:
     """Query OSM for bike lane and street geometries covering `bounds`.
 
-    Returns a GeoDataFrame in TILE_CRS with a `category` column of either
-    "bikelane" or "street". Results are cached to `cache_path` since Overpass
-    queries are slow and rate-limited; pass `force_refresh=True` to re-query.
+    Returns a GeoDataFrame in TILE_CRS with a `category` column ("bikelane" or
+    "street") and the raw `highway` tag, which the OSM road-surface fallback
+    (detection/osm_road_surface.py) uses to look up a default width per class.
+    Results are cached to `cache_path` since Overpass queries are slow and
+    rate-limited; pass `force_refresh=True` to re-query. A cache written before
+    `highway` was preserved is treated as stale and re-queried.
     """
     if cache_path.exists() and not force_refresh:
-        return gpd.read_file(cache_path)
+        cached = gpd.read_file(cache_path)
+        if "highway" in cached.columns:
+            return cached
 
     transformer = Transformer.from_crs(bounds_crs, OSM_CRS, always_xy=True)
     left, bottom, right, top = bounds
@@ -54,7 +59,9 @@ def fetch_osm_features(
     gdf = ox.features_from_polygon(aoi, tags=OSM_TAGS)
     gdf = gdf[gdf.geometry.geom_type.isin(["LineString", "MultiLineString"])]
     gdf["category"] = gdf.apply(_classify, axis=1)
-    gdf = gdf[["geometry", "category"]].to_crs(TILE_CRS)
+    if "highway" not in gdf.columns:
+        gdf["highway"] = None
+    gdf = gdf[["geometry", "category", "highway"]].to_crs(TILE_CRS)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_file(cache_path, driver="GPKG")

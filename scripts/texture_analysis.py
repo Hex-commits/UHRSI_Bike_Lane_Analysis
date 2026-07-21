@@ -45,7 +45,6 @@ from scripts.config import TEXTURE_STRIDE_PX, TEXTURES_DIR
 from scripts.detection.base import Detection
 from scripts.detection.edge_trace import BikeLaneEdgeDetector, RoadEdgeDetector
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
-from scripts.detection.width import measure_width_m
 from scripts.texture_embedding import cosine_similarity, load_references
 
 
@@ -206,16 +205,12 @@ def visualize_edge_trace(
     combined.save(output_path)
 
     print(f"Wrote {output_path}  (coarse px {coarse_mask.sum()}, traced px {traced_mask.sum()})")
+    # Segment *width* is deliberately not reported. It was read off the traced
+    # mask's own shape, which is not a boundary this pipeline trusts; the gap
+    # to the carriageway (scripts/detect.py) is the measured quantity.
     print(f"{len(edge_detections)} traced segment(s):")
     for i, detection in enumerate(sorted(edge_detections, key=lambda d: -d.mask.sum())):
-        stats = measure_width_m(detection.mask, pixel_size_m) if surface == "bikelane" else None
-        stats_str = (
-            f"mean={stats.mean_m:.2f}m median={stats.median_m:.2f}m "
-            f"min={stats.min_m:.2f}m max={stats.max_m:.2f}m n={stats.n_samples}"
-            if stats
-            else "n/a"
-        )
-        print(f"  segment {i} ({detection.mask.sum()} px): {stats_str}")
+        print(f"  segment {i} ({detection.mask.sum()} px)")
     return edge_detections
 
 

@@ -7,7 +7,7 @@ pipeline change with:*
 uv run python -m scripts.generate_pipeline_report
 ```
 
-*Generated 2026-07-20 22:19 UTC from commit `8117738`.*
+*Generated 2026-07-21 14:07 UTC from commit `d29c156`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -84,73 +84,47 @@ Every stage below runs on the same fixed example region:
 
 ![edge trace](figures/07_edge_trace.png)
 
-## 8. Width measurement
+## 8. Road surface (OSM-width fallback)
 
-- **Method:** per-segment width statistics via skeletonization and distance transform
-  (`scripts/detection/width.py`)
-- **Input:** the final regularized mask from step 7
-
-| segment | px | mean (m) | median (m) | min (m) | max (m) | n samples |
-|---|---|---|---|---|---|---|
-| 0 | 10,005 | 2.81 | 2.80 | 2.04 | 3.60 | 677 |
-| 1 | 327 | 1.60 | 1.60 | 1.26 | 1.65 | 36 |
-| 2 | 105 | 1.17 | 1.20 | 0.89 | 1.20 | 16 |
-
-## 9. Road surface
-
-- **Detector:** `road_detector()` + `RoadEdgeDetector` -- the CNN discriminant at
-  `ROAD_SCORE_THRESHOLD` (0.18) and nothing else
+- **Source:** `USE_OSM_ROAD_FALLBACK` is on, so the CNN road detector is skipped entirely. Each OSM
+  street is buffered to half a default width for its `highway` class (`OSM_ROAD_DEFAULT_WIDTH_M`,
+  `scripts/detection/osm_road_surface.py`) and rasterised as the road surface -- see "OSM-width
+  fallback" under "Road detection" in `README.md`.
 - **Left:** RGB
-- **Middle:** the raw coarse mask, before shadow is cut
-- **Right:** the road surface -- the same mask with shadowed pixels removed. The difference is the
-  scatter of blocks across the dark carriageway on the left, which the coarse detector claimed and
-  which cannot be verified either way
+- **Right:** the assumed road surface (blue), a class-width band centred on each OSM centerline
 
 ![road surface](figures/09_road_trace.png)
 
-**Shadow is cut, not kept.** In deep shadow this imagery carries almost no surface information:
-shadowed carriageway and shadowed non-carriageway measure the same to within noise (median hue
-distance from red 0.405 vs 0.405, saturation 0.506 vs 0.519), and a discriminant fitted and scored
-on the very same pixels still misclassifies 35%. Anything marked road there is close to a coin
-flip, so it is removed along with a 5 px penumbra margin. On this frame that cut 20% of the road
-surface; across the whole tile, 13%. That converts a silent error into a visible coverage gap.
+**No width is measured here.** The surface is exactly the class-width buffer, so a width measured
+against it would only echo the assumption back -- so under this flag `scripts.detect_roads` skips
+width measurement entirely and writes just the surface, no width map or GeoPackage. This is the
+region-of-interest-as-measurement trade the CNN path avoids on purpose; the fallback is kept only for
+coverage, when a detected surface is worse than a sensible per-class guess. The per-class widths in
+`OSM_ROAD_DEFAULT_WIDTH_M` are the one thing to tune for a new area.
 
-Note also the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows,
-so its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
-directly, and it is why widths measured against this surface come out biased wide.
+**Surface assumed on this frame:** 36,153 px across 1 street buffer(s).
 
-**Surface found on this frame:** 45,791 px across 8 component(s).
+## 9. road-to-bike-lane gap
 
-**No width table here, deliberately.** This mask is stamped in `TEXTURE_WINDOW_PX` blocks, so its
-resolution is 4.4 m, and its score ramps over ~5 m across a real road edge rather than stepping at
-it. It answers "is there road here", not "where does it end", and any width read off its shape would
-be measuring the scan grid. Road widths are measured from OSM centerlines by
-`scripts.detect_roads` -- see "Road detection" in `README.md`.
-
-The colour test and morphology that used to sit here were removed after being measured: the colour
-test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
-step after it moved the boundary a width would be taken from.
-
-## 10. Carriageway-to-bike-lane gap
-
-- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
-  the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
-  `README.md`
-- **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask on the left of step 9 is
-  quantised to 4.4 m blocks. A cross-section cut from the pixels locates each edge subpixel (measured
-  precision ~0.08 m on this tile) where the mask cannot resolve the feature at all
-- **OSM as scaffold only:** street/lane centerlines say *where* to cut and which way to face; every
-  edge, width and gap is read off pixels
-- **Colour:** each lane segment coloured by the gap to the carriageway; **0 m** (light blue) is a
-  measured result -- the lane is flush with or painted on the road, with no separating strip -- not a
-  blank. Grey is shadow, the only genuinely unmeasurable case
+- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
+  the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
+- **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
+  (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still
+  measured and one it misplaced is not measured in the wrong spot; only the *road* comes from OSM
+- **Road edge from OSM (`USE_OSM_ROAD_FALLBACK`):** the road edge is taken from the road's
+  highway-class width, at half-width along the cross-section, *not* from pixels. The lane edge and the
+  separating strip between are still measured from the imagery, so the gap reads as the distance from
+  the *assumed* road edge to the *measured* lane
+- **Colour:** each lane segment coloured by that gap; **0 m** (light blue) means the assumed road
+  reaches the lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM,
+  which shadow cannot obscure, so nothing is withheld as unmeasurable
 
 ![bikelane gap](figures/10_bikelane_gap.png)
 
-**On this frame:** 31 of 31 cross-sections measured, 0 in
-shadow; median gap 0.00 m, and 81% with no separating strip
-at all (14 contiguous, 11 abutting, 3 bright/marking, 2 asphalt, 1 red paint). That most lanes read 0 m is the real picture of the district: most cycling
-infrastructure here is painted onto or flush with the carriageway. A gap only opens up where a verge,
+**On this frame:** 61 of 72 cross-sections measured, 11 in
+shadow; median gap 0.00 m, and 77% with no separating strip
+at all (47 contiguous, 12 asphalt, 2 red paint). That most lanes read 0 m is the real picture of the district: most cycling
+infrastructure here is painted onto or flush with the road. A gap only opens up where a verge,
 buffer or paved strip physically separates the two -- those are the coloured stretches.
 
 **`contiguous` is "no separating strip detected", not a certified zero.** A paint line fainter than

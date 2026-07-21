@@ -4,7 +4,7 @@ Runs one fixed, validated example region (tile 404_5757, the window used
 throughout development) through every stage -- raw imagery, OSM masking,
 shadow detection, red boost, prefiltered output, CNN texture scan, edge
 tracing/regularization/bridging -- and writes docs/pipeline_report.md with one
-figure per stage plus a width-measurement table. Scoped to a small region
+figure per stage, ending with the road-to-bike-lane gap. Scoped to a small region
 rather than a full tile so it takes under a minute (a full-tile CNN scan takes
 20+ minutes), making "regenerate after every change" practical:
 
@@ -20,11 +20,23 @@ import numpy as np
 import rasterio
 from PIL import Image
 from rasterio.windows import Window
+from scipy.ndimage import label
 from shapely.geometry import box
 
-from scripts.config import INPUT_TILES_DIR, OUTPUT_DIR, TILE_CRS
+from scripts.config import (
+    BIKELANE_MASK_PATHS,
+    INPUT_TILES_DIR,
+    OUTPUT_DIR,
+    TILE_CRS,
+    USE_CACHED_BIKELANE_MASK,
+    USE_OSM_ROAD_FALLBACK,
+)
+from scripts.detection.bikelane_centerlines import (
+    detect_lane_centerlines,
+    lane_centerlines_from_mask,
+)
+from scripts.detection.osm_road_surface import osm_road_surface
 from scripts.detection.texture_detector import bike_lane_detector, road_detector
-from scripts.detection.width import measure_width_m
 from scripts.measure_bikelane_gap import load_chunk, measure_gaps, prepare_shadow, render_map
 from scripts.osm_features import fetch_osm_features
 from scripts.texture_analysis import visualize_edge_trace, visualize_scan
@@ -75,7 +87,6 @@ def main() -> None:
         prefiltered_rgb = np.transpose(src.read([1, 2, 3], window=WINDOW), (1, 2, 0))
         classification = src.read(5, window=WINDOW)
         shadow = src.read(6, window=WINDOW)
-        pixel_size_m = src.res[0]
 
     _save_png(raw_rgb, FIGURES_DIR / "01_raw.png")
 
@@ -93,22 +104,43 @@ def main() -> None:
     coarse_detector = bike_lane_detector()
     visualize_scan(OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "06_cnn_scan.png", detector=coarse_detector)
 
-    edge_detections = visualize_edge_trace(
+    visualize_edge_trace(
         OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "07_edge_trace.png", coarse_detector=coarse_detector
     )
 
-    width_rows = _width_rows(edge_detections, pixel_size_m)
-
-    road_coarse = road_detector()
-    road_detections = visualize_edge_trace(
-        OUTPUT_TILE_PATH, WINDOW, FIGURES_DIR / "09_road_trace.png", coarse_detector=road_coarse, surface="road"
-    )
-    road_surface_px = int(sum(d.mask.sum() for d in road_detections))
+    road_surface_px, road_components, road_is_osm = _road_figure(FIGURES_DIR / "09_road_trace.png")
 
     gap_summary = _bikelane_gap(FIGURES_DIR / "10_bikelane_gap.png")
 
-    _write_report(width_rows, road_surface_px, len(road_detections), gap_summary)
+    _write_report(road_surface_px, road_components, gap_summary, road_is_osm)
     print(f"Wrote {REPORT_PATH} and {len(list(FIGURES_DIR.glob('*.png')))} figures in {FIGURES_DIR}")
+
+
+def _road_figure(figure_path: Path) -> tuple[int, int, bool]:
+    """Section 8's road surface, honouring `USE_OSM_ROAD_FALLBACK`.
+
+    With the flag set, the CNN scan is skipped and the surface is the assumed
+    OSM class-width buffers (the same source `detect_roads` uses); the figure
+    becomes RGB alongside that surface. Otherwise it is the CNN road trace.
+    Returns (surface px, buffer/component count, whether OSM was used).
+    """
+    if not USE_OSM_ROAD_FALLBACK:
+        road_coarse = road_detector()
+        detections = visualize_edge_trace(
+            OUTPUT_TILE_PATH, WINDOW, figure_path, coarse_detector=road_coarse, surface="road"
+        )
+        return int(sum(d.mask.sum() for d in detections)), len(detections), False
+
+    with rasterio.open(OUTPUT_TILE_PATH) as src:
+        rgb = np.transpose(src.read([1, 2, 3], window=WINDOW), (1, 2, 0))
+        transform = src.window_transform(WINDOW)
+        bounds = src.window_bounds(WINDOW)
+    streets = fetch_osm_features(bounds)
+    streets = streets[streets.category == "street"].clip(box(*bounds))
+    surface = osm_road_surface(streets, transform, rgb.shape[:2])
+    _side_by_side(rgb, _overlay(rgb, surface, (0, 128, 255)), figure_path)
+    _, n_components = label(surface)
+    return int(surface.sum()), int(n_components), True
 
 
 def _bikelane_gap(figure_path: Path) -> dict:
@@ -116,15 +148,19 @@ def _bikelane_gap(figure_path: Path) -> dict:
 
     Reuses `scripts.measure_bikelane_gap` end to end -- the same code the
     standalone tool runs -- so this figure can never drift from the tool.
-    Scoped to the report's fixed WINDOW like every other stage; it happens to
-    hold 9 OSM bike-lane ways alongside 10 streets, enough for a worked
-    example.
+    Scoped to the report's fixed WINDOW like every other stage: roads come from
+    OSM, but the bike lanes are detected from the imagery (not OSM), the same
+    cycle track step 7 traces.
     """
     bands, transform, bounds, pixel_size_m = load_chunk(WINDOW)
     osm = fetch_osm_features(bounds)
     clip = box(*bounds)
     streets = osm[osm.category == "street"].clip(clip)
-    lanes = osm[osm.category == "bikelane"].clip(clip)
+    cached_mask = BIKELANE_MASK_PATHS.get(TILE_STEM)
+    if USE_CACHED_BIKELANE_MASK and cached_mask and cached_mask.exists():
+        lanes = lane_centerlines_from_mask(cached_mask, WINDOW)
+    else:
+        lanes = detect_lane_centerlines(OUTPUT_TILE_PATH, WINDOW)
 
     corrected, shadow, near_edge = prepare_shadow(bands, transform, bounds, pixel_size_m, streets)
     records, _sections, _skipped = measure_gaps(corrected, transform, bounds, shadow,
@@ -148,23 +184,101 @@ def _bikelane_gap(figure_path: Path) -> dict:
     }
 
 
-def _width_rows(detections: list, pixel_size_m: float) -> list[tuple[int, int, "object"]]:
-    rows = []
-    for i, detection in enumerate(sorted(detections, key=lambda d: -d.mask.sum())):
-        stats = measure_width_m(detection.mask, pixel_size_m)
-        if stats:
-            rows.append((i, int(detection.mask.sum()), stats))
-    return rows
+def _section_9(road_surface_px: int, road_components: int, road_is_osm: bool) -> str:
+    """Section 8's markdown, matching whichever road source `_road_figure` used."""
+    if road_is_osm:
+        return f"""## 8. Road surface (OSM-width fallback)
+
+- **Source:** `USE_OSM_ROAD_FALLBACK` is on, so the CNN road detector is skipped entirely. Each OSM
+  street is buffered to half a default width for its `highway` class (`OSM_ROAD_DEFAULT_WIDTH_M`,
+  `scripts/detection/osm_road_surface.py`) and rasterised as the road surface -- see "OSM-width
+  fallback" under "Road detection" in `README.md`.
+- **Left:** RGB
+- **Right:** the assumed road surface (blue), a class-width band centred on each OSM centerline
+
+![road surface](figures/09_road_trace.png)
+
+**No width is measured here.** The surface is exactly the class-width buffer, so a width measured
+against it would only echo the assumption back -- so under this flag `scripts.detect_roads` skips
+width measurement entirely and writes just the surface, no width map or GeoPackage. This is the
+region-of-interest-as-measurement trade the CNN path avoids on purpose; the fallback is kept only for
+coverage, when a detected surface is worse than a sensible per-class guess. The per-class widths in
+`OSM_ROAD_DEFAULT_WIDTH_M` are the one thing to tune for a new area.
+
+**Surface assumed on this frame:** {road_surface_px:,} px across {road_components} street buffer(s)."""
+
+    return f"""## 8. Road surface
+
+- **Detector:** `road_detector()` + `RoadEdgeDetector` -- the CNN discriminant at
+  `ROAD_SCORE_THRESHOLD` (0.18) and nothing else
+- **Left:** RGB
+- **Middle:** the raw coarse mask, before shadow is cut
+- **Right:** the road surface -- the same mask with shadowed pixels removed. The difference is the
+  scatter of blocks across the dark road on the left, which the coarse detector claimed and
+  which cannot be verified either way
+
+![road surface](figures/09_road_trace.png)
+
+**Shadow is cut, not kept.** In deep shadow this imagery carries almost no surface information:
+shadowed road and shadowed non-road measure the same to within noise (median hue
+distance from red 0.405 vs 0.405, saturation 0.506 vs 0.519), and a discriminant fitted and scored
+on the very same pixels still misclassifies 35%. Anything marked road there is close to a coin
+flip, so it is removed along with a 5 px penumbra margin. On this frame that cut 20% of the road
+surface; across the whole tile, 13%. That converts a silent error into a visible coverage gap.
+
+Note also the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows,
+so its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
+directly, and it is why widths measured against this surface come out biased wide.
+
+**Surface found on this frame:** {road_surface_px:,} px across {road_components} component(s).
+
+**No width table here, deliberately.** This mask is stamped in `TEXTURE_WINDOW_PX` blocks, so its
+resolution is 4.4 m, and its score ramps over ~5 m across a real road edge rather than stepping at
+it. It answers "is there road here", not "where does it end", and any width read off its shape would
+be measuring the scan grid. Road widths are measured from OSM centerlines by
+`scripts.detect_roads` -- see "Road detection" in `README.md`.
+
+The colour test and morphology that used to sit here were removed after being measured: the colour
+test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
+step after it moved the boundary a width would be taken from."""
 
 
-def _write_report(width_rows: list[tuple[int, int, "object"]], road_surface_px: int,
-                  road_components: int, gap: dict) -> None:
-    width_table_rows = "\n".join(
-        f"| {i} | {px:,} | {stats.mean_m:.2f} | {stats.median_m:.2f} | {stats.min_m:.2f} | {stats.max_m:.2f} | {stats.n_samples} |"
-        for i, px, stats in width_rows
-    )
+def _gap_bullets(road_is_osm: bool) -> str:
+    """Section 9's intro bullets, reflecting where the road edge comes from."""
+    if road_is_osm:
+        return """- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
+  the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
+- **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
+  (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still
+  measured and one it misplaced is not measured in the wrong spot; only the *road* comes from OSM
+- **Road edge from OSM (`USE_OSM_ROAD_FALLBACK`):** the road edge is taken from the road's
+  highway-class width, at half-width along the cross-section, *not* from pixels. The lane edge and the
+  separating strip between are still measured from the imagery, so the gap reads as the distance from
+  the *assumed* road edge to the *measured* lane
+- **Colour:** each lane segment coloured by that gap; **0 m** (light blue) means the assumed road
+  reaches the lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM,
+  which shadow cannot obscure, so nothing is withheld as unmeasurable"""
+
+    return """- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
+  the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
+  `README.md`
+- **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask on the left of step 9 is
+  quantised to 4.4 m blocks. A cross-section cut from the pixels locates each edge subpixel (measured
+  precision ~0.08 m on this tile) where the mask cannot resolve the feature at all
+- **Sources:** bike-lane centrelines are detected from the imagery
+  (`detection/bikelane_centerlines.py`, the same trace as step 7); OSM supplies only the *road*
+  centerline -- where to cut and which way to face. Every edge, width and gap is read off pixels
+- **Colour:** each lane segment coloured by the gap to the road; **0 m** (light blue) is a
+  measured result -- the lane is flush with or painted on the road, with no separating strip -- not a
+  blank"""
+
+
+def _write_report(road_surface_px: int, road_components: int,
+                  gap: dict, road_is_osm: bool) -> None:
     gap_composition = ", ".join(f"{count} {kind}" for kind, count in
                                 sorted(gap["composition"].items(), key=lambda kv: -kv[1]))
+    section_9 = _section_9(road_surface_px, road_components, road_is_osm)
+    gap_bullets = _gap_bullets(road_is_osm)
     content = f"""# Pipeline walkthrough: one worked example
 
 *Auto-generated by `scripts/generate_pipeline_report.py`. Do not edit by hand; regenerate after any
@@ -251,64 +365,11 @@ Every stage below runs on the same fixed example region:
 
 ![edge trace](figures/07_edge_trace.png)
 
-## 8. Width measurement
+{section_9}
 
-- **Method:** per-segment width statistics via skeletonization and distance transform
-  (`scripts/detection/width.py`)
-- **Input:** the final regularized mask from step 7
+## 9. road-to-bike-lane gap
 
-| segment | px | mean (m) | median (m) | min (m) | max (m) | n samples |
-|---|---|---|---|---|---|---|
-{width_table_rows}
-
-## 9. Road surface
-
-- **Detector:** `road_detector()` + `RoadEdgeDetector` -- the CNN discriminant at
-  `ROAD_SCORE_THRESHOLD` (0.18) and nothing else
-- **Left:** RGB
-- **Middle:** the raw coarse mask, before shadow is cut
-- **Right:** the road surface -- the same mask with shadowed pixels removed. The difference is the
-  scatter of blocks across the dark road on the left, which the coarse detector claimed and
-  which cannot be verified either way
-
-![road surface](figures/09_road_trace.png)
-
-**Shadow is cut, not kept.** In deep shadow this imagery carries almost no surface information:
-shadowed road and shadowed non-road measure the same to within noise (median hue
-distance from red 0.405 vs 0.405, saturation 0.506 vs 0.519), and a discriminant fitted and scored
-on the very same pixels still misclassifies 35%. Anything marked road there is close to a coin
-flip, so it is removed along with a 5 px penumbra margin. On this frame that cut 20% of the road
-surface; across the whole tile, 13%. That converts a silent error into a visible coverage gap.
-
-Note also the stair-stepped boundary. The mask is stamped in whole `TEXTURE_WINDOW_PX` scan windows,
-so its edges follow the scan grid rather than any kerb. That is the 4.4 m quantisation, visible
-directly, and it is why widths measured against this surface come out biased wide.
-
-**Surface found on this frame:** {road_surface_px:,} px across {road_components} component(s).
-
-**No width table here, deliberately.** This mask is stamped in `TEXTURE_WINDOW_PX` blocks, so its
-resolution is 4.4 m, and its score ramps over ~5 m across a real road edge rather than stepping at
-it. It answers "is there road here", not "where does it end", and any width read off its shape would
-be measuring the scan grid. Road widths are measured from OSM centerlines by
-`scripts.detect_roads` -- see "Road detection" in `README.md`.
-
-The colour test and morphology that used to sit here were removed after being measured: the colour
-test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
-step after it moved the boundary a width would be taken from.
-
-## 10. road-to-bike-lane gap
-
-- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
-  the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
-  `README.md`
-- **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask on the left of step 9 is
-  quantised to 4.4 m blocks. A cross-section cut from the pixels locates each edge subpixel (measured
-  precision ~0.08 m on this tile) where the mask cannot resolve the feature at all
-- **OSM as scaffold only:** street/lane centerlines say *where* to cut and which way to face; every
-  edge, width and gap is read off pixels
-- **Colour:** each lane segment coloured by the gap to the road; **0 m** (light blue) is a
-  measured result -- the lane is flush with or painted on the road, with no separating strip -- not a
-  blank. Grey is shadow, the only genuinely unmeasurable case
+{gap_bullets}
 
 ![bikelane gap](figures/10_bikelane_gap.png)
 

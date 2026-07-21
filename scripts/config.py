@@ -78,13 +78,10 @@ TRAINING_VAL_FRACTION = 0.2
 YOLO_SEG_BASE_CHECKPOINT = "yolo11n-seg.pt"
 YOLO_SEG_TRAINED_WEIGHTS_PATH = PROJECT_ROOT / "runs" / "segment" / "train" / "weights" / "best.pt"
 
-DETECTION_CHIP_SIZE_PX = TRAINING_CHIP_SIZE_PX
-DETECTION_CHIP_OVERLAP_PX = TRAINING_CHIP_OVERLAP_PX
-DETECTION_CONFIDENCE_THRESHOLD = 0.25
-
+# Where scripts/detect.py writes the bike lanes it detected. (The YOLO-seg
+# inference chip size, overlap and confidence threshold that used to live
+# here went with that pipeline -- see "Retired" in README.)
 DETECTION_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelanes.gpkg"
-
-DETECTION_RASTER_FIELDS = ["score", "width_mean_m"]
 
 
 TEXTURE_WINDOW_PX = 22
@@ -93,3 +90,102 @@ BIKE_LANE_TEXTURE_LABELS = ("bikelane", ("negative",))
 ROAD_TEXTURE_LABELS = ("road", ("bikelane", "negative"))
 
 TEXTURE_STRIDE_PX = 11
+
+
+USE_OSM_ROAD_FALLBACK = True
+
+OSM_ROAD_DEFAULT_WIDTH_M = {
+    "primary": 12.0,
+    "primary_link": 7.0,
+    "secondary": 10.0,
+    "secondary_link": 6.5,
+    "tertiary": 8.0,
+    "tertiary_link": 6.0,
+    "unclassified": 6.0,
+    "residential": 5.5,
+    "living_street": 4.5,
+    "service": 3.5,
+}
+
+OSM_ROAD_DEFAULT_WIDTH_FALLBACK_M = 6.0
+
+
+# --- Bike-lane gap: the pipeline's final product (scripts/detect.py) ---
+
+# Tiles the pipeline runs over. Each is read twice, from two different
+# versions of itself: lane *detection* runs on the prefiltered output
+# (data/output/), because the edge tracer keys on red-boosted paint, while
+# every gap *distance* is measured on the raw input tile, whose pixels no
+# buffer mask has touched. Measuring on the prefiltered tile would put an
+# artificial edge exactly where a lane's outer boundary sits.
+PIPELINE_TILE_STEMS = [
+    "idop20rgbi_32_404_5757_1_nw_2025",
+]
+
+# Spacing of cross-sections along a detected lane, and the span either side
+# of a sample used to estimate the lane's local direction.
+GAP_SECTION_INTERVAL_M = 2.0
+GAP_TANGENT_HALF_SPAN_M = 2.5
+
+# A lane further than this from any street centerline is not "alongside a
+# road" -- it is a park path or a separate route, and its distance to the
+# nearest carriageway is not a meaningful safety measure.
+GAP_MAX_LANE_TO_ROAD_M = 20.0
+
+# How far a cross-section reaches past each end: back behind the road
+# centerline so the carriageway run is bounded on both sides, and past the
+# lane so the lane's own far edge falls inside the profile.
+GAP_BEHIND_ROAD_M = 3.0
+GAP_BEYOND_LANE_M = 4.0
+
+# Shadow correction leaves a residual false edge at the shadow boundary --
+# the peak material gradient there only drops ~36%. Past ~3 m the residual
+# b-chroma deviation falls to +0.004, so cross-sections centred nearer than
+# this are dropped rather than trusted.
+GAP_SHADOW_EDGE_MARGIN_M = 3.0
+
+# Corridor half-width that gives shadow detection a single population to
+# threshold. Handing detect_shadow_mask every non-vegetated pixel puts
+# rooftops in with pavement, and Otsu then splits roof-from-road instead of
+# shadow-from-sunlit, flagging whole buildings as shadow.
+GAP_SHADOW_CORRIDOR_M = 14.0
+
+# Colour breaks for the gap map, in metres. Quantised rather than linear:
+# the distribution is heavily skewed towards small gaps, so a linear ramp
+# spends most of its range on a few wide outliers and renders everything
+# under a metre as one indistinguishable pale blue. The first four bands are
+# all sub-metre by design.
+GAP_MAP_BREAKS_M = [0.0, 0.10, 0.25, 0.50, 1.00, 2.00, 4.00, 8.00]
+
+GAP_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelane_gap.gpkg"
+GAP_MAP_PATH = PROJECT_ROOT / "data" / "detections" / "bikelane_gap_map.png"
+
+# Where bike-lane locations come from.
+#
+# True: read the cached full-tile detection raster below. These masks are the
+# best lane detection this project has produced -- on tile 404_5757 the mask
+# holds 163 components against the ~26 a fresh in-process trace finds over
+# the same ground, because it was produced by a tuned full-tile run rather
+# than re-derived per call. Reading it also costs seconds instead of the
+# ~20 min a coarse CNN scan takes, which is what makes a whole-tile gap run
+# practical at all.
+#
+# False: re-trace lanes in-process with detection/bikelane_centerlines.py.
+# Correct but slower and sparser; use it for a tile with no cached mask.
+USE_CACHED_BIKELANE_MASK = True
+
+# Cached detection rasters, per tile stem. Any tile absent here falls back to
+# in-process tracing regardless of the flag above.
+BIKELANE_MASK_PATHS = {
+    "idop20rgbi_32_404_5757_1_nw_2025":
+        PROJECT_ROOT / "data" / "detections" / "bikelane_detections" /
+        "bikelane_edge_mask_404_5757_hires.tif",
+    "idop20rgbi_32_404_5758_1_nw_2025":
+        PROJECT_ROOT / "data" / "detections" / "bikelane_detections" /
+        "bikelane_edge_mask_404_5758_hires.tif",
+}
+
+# Connected components smaller than this are dropped before reducing a mask
+# to centerlines. At 0.2 m/px, 200 px is 8 m^2 -- below a real lane fragment,
+# above the speckle the edge tracer leaves behind.
+MIN_LANE_COMPONENT_PX = 200

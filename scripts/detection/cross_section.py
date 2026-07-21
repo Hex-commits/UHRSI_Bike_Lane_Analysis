@@ -70,6 +70,7 @@ class CrossSection:
     edges: list[Edge]
     runs: list[Run] = field(default_factory=list)
     shadow_fraction: float = 0.0
+    shadow: np.ndarray | None = None
 
     @property
     def material_edges(self) -> list[Edge]:
@@ -80,6 +81,20 @@ class CrossSection:
             if run.contains(distance_m):
                 return run
         return None
+
+    def shadow_fraction_between(self, start_m: float, end_m: float) -> float:
+        """Shadow fraction over just the [start_m, end_m] span of this section.
+
+        Lets a caller judge only the stretch it actually reads from pixels --
+        e.g. the OSM-fallback gap reads the lane side but not the road behind
+        it, so shadow over the road should not count against the measurement.
+        Falls back to the whole-section fraction if no per-sample shadow was
+        sampled, and returns 0 for an empty span.
+        """
+        if self.shadow is None:
+            return self.shadow_fraction
+        window = (self.distance_m >= start_m) & (self.distance_m <= end_m)
+        return float(self.shadow[window].mean()) if window.any() else 0.0
 
 
 def features(bands: np.ndarray) -> dict[str, np.ndarray]:
@@ -236,7 +251,8 @@ def measure(bands, inverse_transform, origin_xy, direction, start_m, end_m,
     edges.sort(key=lambda e: e.distance_m)
     runs = segment(distance, profile, edges, shadow, markings)
     return CrossSection(distance_m=distance, bands=profile, edges=edges, runs=runs,
-                        shadow_fraction=float(shadow.mean()) if shadow is not None else 0.0)
+                        shadow_fraction=float(shadow.mean()) if shadow is not None else 0.0,
+                        shadow=shadow)
 
 
 def edge_precision_m(sections: list[CrossSection], max_offset_m: float = 0.5) -> dict:
