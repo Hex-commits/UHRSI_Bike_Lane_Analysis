@@ -132,6 +132,18 @@ GAP_TANGENT_HALF_SPAN_M = 2.5
 # nearest carriageway is not a meaningful safety measure.
 GAP_MAX_LANE_TO_ROAD_M = 20.0
 
+# The reference road must run roughly *alongside* the lane. Without this the
+# nearest way wins outright, and the nearest way is very often a driveway or
+# parking aisle the lane simply crosses: measured on tile 404_5757, 47% of
+# references were `service` ways and 27% sat beyond 60 degrees to the lane.
+# The distance to a road you cross is not a separation from it.
+GAP_MAX_ROAD_ANGLE_DEG = 35.0
+
+# Highway classes never used as the road reference. A cycle track running
+# beside a tertiary road should be measured against that road, not against
+# the service driveway that happens to pass closer.
+GAP_EXCLUDED_ROAD_CLASSES = {"service"}
+
 # How far a cross-section reaches past each end: back behind the road
 # centerline so the carriageway run is bounded on both sides, and past the
 # lane so the lane's own far edge falls inside the profile.

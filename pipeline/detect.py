@@ -124,7 +124,7 @@ def run_tile(stem: str, window: Window | None):
 
     frame = gpd.GeoDataFrame(records, crs=TILE_CRS)
     frame["tile"] = stem
-    return (frame, bands, transform, pixel_size_m), lanes
+    return (frame, bands, transform, pixel_size_m, streets, lane_mask), lanes
 
 
 def load_chunk_for(raw_tile, window):
@@ -152,9 +152,9 @@ def main() -> None:
         result, lanes = run_tile(stem, window)
         all_lanes.append(lanes)
         if result is not None:
-            frame, bands, transform, pixel_size_m = result
+            frame, bands, transform, pixel_size_m, streets, lane_mask = result
             frames.append(frame)
-            last = (bands, transform, frame, lanes, pixel_size_m)
+            last = (bands, transform, frame, lanes, pixel_size_m, streets, lane_mask)
 
     if not frames:
         print("\nno gaps measured")
@@ -176,10 +176,10 @@ def main() -> None:
     gaps.drop(columns=["lane_point"]).to_file(gap_path, driver="GPKG")
     print(f"Wrote {len(gaps)} gap measurements to {gap_path}")
 
-    bands, transform, frame, lanes, pixel_size_m = last
+    bands, transform, frame, lanes, pixel_size_m, streets, lane_mask = last
     map_path = render_map(bands, transform, frame, lanes,
                           GAP_MAP_PATH.with_name(f"{GAP_MAP_PATH.stem}{suffix}.png"),
-                          pixel_size_m)
+                          pixel_size_m, streets=streets, lane_mask=lane_mask)
     print(f"Wrote {map_path}")
 
     # Reported over every cross-section, matching the map. The `reliable`

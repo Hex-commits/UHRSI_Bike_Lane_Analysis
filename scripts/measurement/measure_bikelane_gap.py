@@ -18,11 +18,15 @@ from pipeline.config import (
     GAP_MAP_BREAKS_M,
     GAP_MAP_PATH,
     GAP_MAX_LANE_TO_ROAD_M,
+    GAP_MAX_ROAD_ANGLE_DEG,
+    GAP_EXCLUDED_ROAD_CLASSES,
     GAP_OUTPUT_PATH,
     GAP_SECTION_INTERVAL_M,
     GAP_SHADOW_CORRIDOR_M,
     GAP_SHADOW_EDGE_MARGIN_M,
     GAP_TANGENT_HALF_SPAN_M,
+    BIKELANE_MASK_PATHS,
+    USE_CACHED_BIKELANE_MASK,
     INPUT_TILES_DIR,
     OUTPUT_DIR as PREFILTERED_DIR,
     PIPELINE_TILE_STEMS,
@@ -30,7 +34,11 @@ from pipeline.config import (
     TILE_CRS,
     USE_OSM_ROAD_FALLBACK,
 )
-from scripts.detection.bikelane_centerlines import detect_lane_centerlines
+from scripts.detection.bikelane_centerlines import (
+    detect_lane_centerlines,
+    lane_centerlines_from_mask,
+    load_lane_mask,
+)
 from scripts.measurement.cross_section import (
     ASPHALT,
     SHADOW_UNKNOWN,
@@ -38,7 +46,7 @@ from scripts.measurement.cross_section import (
     features,
     measure,
 )
-from scripts.measurement.osm_road_surface import road_width_m
+from scripts.measurement.osm_road_surface import osm_road_surface, road_width_m
 from scripts.preprocessing.osm_features import fetch_osm_features
 from scripts.preprocessing.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
 
@@ -52,10 +60,52 @@ OUTPUT_DIR = GAP_OUTPUT_PATH.parent
 SECTION_INTERVAL_M = GAP_SECTION_INTERVAL_M
 TANGENT_HALF_SPAN_M = GAP_TANGENT_HALF_SPAN_M
 MAX_LANE_TO_ROAD_M = GAP_MAX_LANE_TO_ROAD_M
+MAX_ROAD_ANGLE_DEG = GAP_MAX_ROAD_ANGLE_DEG
 BEHIND_ROAD_M = GAP_BEHIND_ROAD_M
 BEYOND_LANE_M = GAP_BEYOND_LANE_M
 SHADOW_EDGE_MARGIN_M = GAP_SHADOW_EDGE_MARGIN_M
 SHADOW_CORRIDOR_M = GAP_SHADOW_CORRIDOR_M
+
+
+def _tangent(geometry, distance_along: float):
+    """Unit direction of `geometry` at `distance_along`, or None if degenerate."""
+    before = geometry.interpolate(max(0.0, distance_along - TANGENT_HALF_SPAN_M))
+    after = geometry.interpolate(min(geometry.length, distance_along + TANGENT_HALF_SPAN_M))
+    vector = np.array([after.x - before.x, after.y - before.y])
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm else None
+
+
+def _reference_road(tree, geoms, highways, lane_point, lane_tangent):
+    """Nearest street that actually runs *alongside* the lane here.
+
+    Not simply the nearest street. The nearest street is very often a
+    driveway or parking aisle the lane crosses, and the distance to a road
+    you cross is not a separation from it. Candidates must be within
+    MAX_LANE_TO_ROAD_M, not an excluded class, and within
+    MAX_ROAD_ANGLE_DEG of the lane's own direction; the closest survivor
+    wins. Returns (index, road_point, separation) or None.
+    """
+    best = None
+    for index in tree.query(lane_point.buffer(MAX_LANE_TO_ROAD_M)):
+        index = int(index)
+        highway = highways[index]
+        if isinstance(highway, str) and highway in GAP_EXCLUDED_ROAD_CLASSES:
+            continue
+        street = geoms[index]
+        road_point, _ = nearest_points(street, lane_point)
+        separation = road_point.distance(lane_point)
+        if not 0.5 < separation <= MAX_LANE_TO_ROAD_M:
+            continue
+        street_tangent = _tangent(street, street.project(lane_point))
+        if lane_tangent is None or street_tangent is None:
+            continue
+        angle = np.degrees(np.arccos(min(1.0, abs(float(np.dot(lane_tangent, street_tangent))))))
+        if angle > MAX_ROAD_ANGLE_DEG:
+            continue
+        if best is None or separation < best[2]:
+            best = (index, road_point, separation)
+    return best
 
 
 def _iter_lines(geometry):
@@ -112,13 +162,12 @@ def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes, la
             lane_id = f"{lane_index}:{part_index}"
             for offset in np.arange(0.0, line.length, SECTION_INTERVAL_M):
                 lane_point = line.interpolate(offset)
-                nearest_idx = int(street_tree.nearest(lane_point))
-                nearest_street = street_geoms[nearest_idx]
-                road_point, _ = nearest_points(nearest_street, lane_point)
-                separation = road_point.distance(lane_point)
-                if not 0.5 < separation <= MAX_LANE_TO_ROAD_M:
+                reference = _reference_road(street_tree, street_geoms, street_highways,
+                                            lane_point, _tangent(line, offset))
+                if reference is None:
                     skipped["far"] += 1
                     continue
+                nearest_idx, road_point, separation = reference
 
                 col, row = inverse * (road_point.x, road_point.y)
                 if not (0 <= int(row) < height and 0 <= int(col) < width):
@@ -225,30 +274,39 @@ def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes, la
     return records, sections, skipped
 
 
-def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(13, 13)):
-    """Draw every measured lane point over the imagery, coloured by gap.
+def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(13, 13),
+               streets=None, lane_mask=None):
+    """Draw the two things being compared, and colour the space between them.
 
-    Gap width is a magnitude, so a single-hue sequential ramp. "Undetermined"
-    is the absence of a measurement, not a small gap, so it takes a neutral
-    off-ramp colour drawn underneath, never reading as "0 m".
+    The figure has to answer "the gap between *what* and *what*", so the road
+    and the bike lane are each drawn as a flat, uniform shape -- they are
+    identities, not magnitudes, and colouring them by anything would compete
+    with the one quantity that is a magnitude. The measured gap is the ribbon
+    between them, and it alone carries the sequential ramp.
+
+    An earlier version coloured the *lane* by its gap, which put the number on
+    the wrong object: the reader saw a coloured lane and no indication of what
+    it was measured against.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
     from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap
-    from matplotlib.collections import LineCollection
+    from matplotlib.patches import Patch
 
     surface, ink, muted = "#fcfcfb", "#0b0b0b", "#52514e"
+    # The gap ramp is blue, so road and lane are deliberately non-blue: no
+    # step of a sequential ramp should be confusable with a categorical fill.
     ramp = LinearSegmentedColormap.from_list("gap", ["#9ec5ef", "#2a78d6", "#0d2f56"])
+    ROAD_COLOR, LANE_COLOR = "#eda100", "#008300"
 
     inverse = ~transform
     preview_scale = min(1.0, 2200 / max(bands.shape[1], bands.shape[2]))
     rgb = np.clip(np.transpose(bands[:3], (1, 2, 0)) / 255.0, 0, 1)
-    if preview_scale < 1.0:
-        step = int(round(1 / preview_scale))
+    step = int(round(1 / preview_scale)) if preview_scale < 1.0 else 1
+    if step > 1:
         rgb = rgb[::step, ::step]
-    else:
-        step = 1
 
     grey = rgb.mean(axis=2, keepdims=True)
     rgb = np.clip((rgb * 0.35 + grey * 0.65) * 0.62 + 0.10, 0, 1)
@@ -256,54 +314,81 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     fig, ax = plt.subplots(figsize=figsize, facecolor=surface)
     ax.imshow(rgb)
 
-    reliable = frame[frame.reliable]
+    # --- the two things being compared, each one flat colour ---------------
+    if streets is not None and not streets.empty:
+        road = osm_road_surface(streets, transform, bands.shape[1:])[::step, ::step]
+        ax.imshow(np.ma.masked_where(~road, road), cmap=ListedColormap([ROAD_COLOR]),
+                  alpha=0.55, zorder=2, interpolation="nearest")
+    if lane_mask is not None and lane_mask.any():
+        lane = np.asarray(lane_mask)[::step, ::step]
+        ax.imshow(np.ma.masked_where(~lane, lane), cmap=ListedColormap([LANE_COLOR]),
+                  alpha=0.85, zorder=3, interpolation="nearest")
+
+    # --- the gap itself, carrying the scale --------------------------------
     breaks = list(GAP_MAP_BREAKS_M)
     binned = ListedColormap([ramp(i / (len(breaks) - 1)) for i in range(len(breaks))])
     norm = BoundaryNorm(breaks, binned.N, extend="max")
 
-    # Every cross-section is drawn with its measured gap. There is no
-    # "unmeasurable" class on this map: with USE_OSM_ROAD_FALLBACK the road
-    # edge is the OSM class-width buffer, which shadow cannot obscure, so a
-    # shadowed stretch still yields a gap. The `reliable` and
-    # `shadow_fraction` columns survive in the GeoPackage for anyone who
-    # wants to filter on them -- the information is kept, just not used to
-    # blank out the map.
-    measured = []
-    for lane_id, group in frame.groupby("lane_id"):
-        ordered = group.sort_values("offset_m")
-        points = np.array([[p.x, p.y] for p in ordered.lane_point])
-        cols, rows = inverse * (points[:, 0], points[:, 1])
-        xy = np.column_stack([cols / step, rows / step])
-        offsets = ordered.offset_m.to_numpy()
-        gaps = ordered.gap_m.to_numpy()
+    def edge_points(row):
+        """(road-edge, lane-edge) in preview pixels, along this cross-section."""
+        road_pt = np.array(row.geometry.coords[0])
+        lane_pt = np.array(row.geometry.coords[-1])
+        span = np.linalg.norm(lane_pt - road_pt)
+        if span == 0 or not np.isfinite(row.gap_m):
+            return None
+        unit = (lane_pt - road_pt) / span
+        out = []
+        for along in (row.road_edge_m, row.lane_edge_m):
+            x, y = road_pt + unit * along
+            col, r = inverse * (x, y)
+            out.append((col / step, r / step))
+        return out
 
-        for i in range(len(xy) - 1):
-            # Don't bridge a break in sampling with one long segment.
+    quads, values = [], []
+    for _lane_id, group in frame.groupby("lane_id"):
+        ordered = group.sort_values("offset_m")
+        rows = list(ordered.itertuples())
+        offsets = ordered.offset_m.to_numpy()
+        anchors = np.array([g.coords[0] for g in ordered.geometry])
+        for i in range(len(rows) - 1):
+            # Don't bridge a break in sampling with one long quad.
             if offsets[i + 1] - offsets[i] > SECTION_INTERVAL_M * 1.6:
                 continue
-            if not (np.isfinite(gaps[i]) and np.isfinite(gaps[i + 1])):
+            # Nor connect two cross-sections anchored to different roads --
+            # that quad spans the space between two streets, not a gap, and
+            # renders as a twist across the figure.
+            if np.linalg.norm(anchors[i + 1] - anchors[i]) > SECTION_INTERVAL_M * 2.5:
                 continue
-            measured.append(([xy[i], xy[i + 1]], 0.5 * (gaps[i] + gaps[i + 1])))
+            a, b = edge_points(rows[i]), edge_points(rows[i + 1])
+            if a is None or b is None:
+                continue
+            # road-edge_i -> lane-edge_i -> lane-edge_i+1 -> road-edge_i+1
+            quads.append([a[0], a[1], b[1], b[0]])
+            values.append(0.5 * (rows[i].gap_m + rows[i + 1].gap_m))
 
-    if measured:
-        ax.add_collection(LineCollection([seg for seg, _ in measured], colors="#12100d",
-                                         linewidths=5.6, zorder=3, capstyle="round", alpha=0.55))
-    if measured:
-        segments, values = zip(*measured)
-        collection = LineCollection(list(segments), cmap=binned, norm=norm,
-                                    linewidths=4.2, zorder=5, capstyle="round")
-        collection.set_array(np.array(values))
-        ax.add_collection(collection)
-        bar = fig.colorbar(collection, ax=ax, fraction=0.032, pad=0.02,
+    if quads:
+        band = PolyCollection(quads, cmap=binned, norm=norm, zorder=4,
+                              edgecolors="face", linewidths=0.4)
+        band.set_array(np.array(values))
+        ax.add_collection(band)
+        bar = fig.colorbar(band, ax=ax, fraction=0.032, pad=0.02,
                            spacing="uniform", ticks=breaks)
         bar.ax.set_yticklabels([f"{b:g}" for b in breaks])
         bar.set_label("gap between road and bike lane (m)", color=muted, fontsize=10)
         bar.ax.tick_params(colors=muted, labelsize=9)
         bar.outline.set_edgecolor("#d8d7d2")
 
+    legend = ax.legend(handles=[
+        Patch(facecolor=ROAD_COLOR, alpha=0.55, label="road (OSM centreline, assumed class width)"),
+        Patch(facecolor=LANE_COLOR, alpha=0.85, label="bike lane (detected from imagery)"),
+    ], frameon=True, fontsize=9.5, labelcolor=ink, loc="lower left", borderpad=0.7)
+    legend.get_frame().set_facecolor(surface)
+    legend.get_frame().set_edgecolor("#d8d7d2")
+    legend.set_zorder(6)
+
     span_m = bands.shape[2] * pixel_size_m
     ax.set_title(f"Road-to-bike-lane gap\n"
-                 f"{len(measured)} lane segments · {span_m:.0f} m across",
+                 f"{len(quads)} measured spans · {span_m:.0f} m across",
                  color=ink, fontsize=13, loc="left", weight="bold")
     ax.axis("off")
     fig.savefig(out_path, dpi=140, facecolor=surface, bbox_inches="tight")
@@ -323,7 +408,15 @@ def main() -> None:
     osm = fetch_osm_features(bounds)
     clip = box(*bounds)
     streets = osm[osm.category == "street"].clip(clip)
-    lanes = detect_lane_centerlines(PREFILTERED_TILE, window)
+    # Same lane source as the pipeline: the cached detection where there is
+    # one, an in-process trace otherwise.
+    cached_mask = BIKELANE_MASK_PATHS.get(_STEM)
+    if USE_CACHED_BIKELANE_MASK and cached_mask and cached_mask.exists():
+        lanes = lane_centerlines_from_mask(cached_mask, window)
+        lane_mask = load_lane_mask(cached_mask, window)
+    else:
+        lanes = detect_lane_centerlines(PREFILTERED_TILE, window)
+        lane_mask = None
     print(f"roads: {len(streets)} OSM street way(s); "
           f"bike lanes: {len(lanes)} detected from imagery (not OSM)")
     if USE_OSM_ROAD_FALLBACK:
@@ -335,7 +428,7 @@ def main() -> None:
           f"{near_edge.mean():.1%} within {SHADOW_EDGE_MARGIN_M:.0f} m of an edge")
 
     records, sections, skipped = measure_gaps(corrected, transform, bounds, shadow,
-                                              near_edge, streets, lanes)
+                                              near_edge, streets, lanes, lane_mask)
     print(f"\n{len(records)} gaps measured from {len(sections)} cross-sections")
     print(f"  skipped: {skipped['far']} lane too far from a road, "
           f"{skipped['shadow']} at a shadow edge, {skipped['unresolved']} unresolved, "
@@ -380,7 +473,7 @@ def main() -> None:
 
     map_path = render_map(bands, transform, frame, lanes,
                           GAP_MAP_PATH.with_name(f"{GAP_MAP_PATH.stem}{suffix}.png"),
-                          pixel_size_m)
+                          pixel_size_m, streets=streets, lane_mask=lane_mask)
     print(f"Wrote {map_path}")
     print(f"took {time.time() - started:.1f} s")
 

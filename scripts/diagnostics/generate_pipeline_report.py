@@ -172,7 +172,7 @@ def _bikelane_gap(figure_path: Path) -> dict:
 
     aspect = WINDOW.width / WINDOW.height
     render_map(bands, transform, frame, lanes, figure_path, pixel_size_m,
-               figsize=(13, 13 / aspect + 3))
+               figsize=(13, 13 / aspect + 3), streets=streets, lane_mask=lane_mask)
 
     reliable = frame[frame.reliable]
     gaps = reliable.gap_m.to_numpy()
