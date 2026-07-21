@@ -71,10 +71,39 @@ class CrossSection:
     runs: list[Run] = field(default_factory=list)
     shadow_fraction: float = 0.0
     shadow: np.ndarray | None = None
+    lane: np.ndarray | None = None  # the detected lane mask, sampled along this profile
 
     @property
     def material_edges(self) -> list[Edge]:
         return [e for e in self.edges if not e.is_illumination]
+
+    def lane_edge_m(self, lane_centre_m: float) -> float | None:
+        """Where the detected lane begins, in profile coordinates.
+
+        Read from the lane mask itself rather than from the spectral
+        segmentation. `run_at(...).start_m` was the obvious candidate and is
+        wrong: where road and lane are the same asphalt with no resolvable
+        edge between them, segmentation returns one run spanning both, whose
+        `start_m` is the profile's start rather than the lane's near edge --
+        which silently collapsed every separated cycle track to a 0 m gap.
+
+        Takes the contiguous block of lane mask containing `lane_centre_m`,
+        not the first block along the profile: a cross-section 12 m long can
+        clip a different lane fragment on its way out, and the block the
+        lane's own centreline sits in is the one being measured.
+
+        Returns None when the mask is absent or the centreline does not land
+        on it -- the caller then has no lane edge to measure from.
+        """
+        if self.lane is None or not self.lane.any():
+            return None
+        index = int(np.argmin(np.abs(self.distance_m - lane_centre_m)))
+        if not self.lane[index]:
+            return None
+        start = index
+        while start > 0 and self.lane[start - 1]:
+            start -= 1
+        return float(self.distance_m[start])
 
     def run_at(self, distance_m: float) -> Run | None:
         for run in self.runs:
@@ -240,19 +269,25 @@ def segment(distance, profile, edges, shadow=None, markings=None) -> list[Run]:
 
 
 def measure(bands, inverse_transform, origin_xy, direction, start_m, end_m,
-            shadow_mask=None) -> CrossSection:
+            shadow_mask=None, lane_mask=None) -> CrossSection:
     """Extract, find edges in, and segment one cross-section."""
-    extra = {"shadow": shadow_mask} if shadow_mask is not None else {}
+    extra = {}
+    if shadow_mask is not None:
+        extra["shadow"] = shadow_mask
+    if lane_mask is not None:
+        extra["lane"] = lane_mask
     distance, profile, sampled = sample(bands, inverse_transform, origin_xy, direction,
                                         start_m, end_m, extra)
     shadow = sampled.get("shadow")
+    lane = sampled.get("lane")
     markings = detect_markings(distance, profile)
     edges = detect_edges(distance, profile) + _marking_edges(markings)
     edges.sort(key=lambda e: e.distance_m)
     runs = segment(distance, profile, edges, shadow, markings)
     return CrossSection(distance_m=distance, bands=profile, edges=edges, runs=runs,
                         shadow_fraction=float(shadow.mean()) if shadow is not None else 0.0,
-                        shadow=shadow)
+                        shadow=shadow,
+                        lane=lane.astype(bool) if lane is not None else None)
 
 
 def edge_precision_m(sections: list[CrossSection], max_offset_m: float = 0.5) -> dict:

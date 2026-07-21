@@ -54,6 +54,7 @@ from pipeline.config import (
 from scripts.detection.bikelane_centerlines import (
     detect_lane_centerlines,
     lane_centerlines_from_mask,
+    load_lane_mask,
 )
 from scripts.measurement.measure_bikelane_gap import (
     load_chunk,
@@ -88,8 +89,10 @@ def run_tile(stem: str, window: Window | None):
     if USE_CACHED_BIKELANE_MASK and cached_mask and cached_mask.exists():
         print(f"  [1/2] reading cached lane detection {cached_mask.name}", flush=True)
         lanes = lane_centerlines_from_mask(cached_mask, window)
+        lane_mask = load_lane_mask(cached_mask, window)
         print(f"        {len(lanes)} lane(s) in {time.time() - started:.1f} s")
     else:
+        lane_mask = None
         print("  [1/2] tracing bike lanes from the prefiltered imagery "
               "(no cached mask; this runs a coarse CNN scan)...", flush=True)
         lanes = detect_lane_centerlines(
@@ -112,7 +115,7 @@ def run_tile(stem: str, window: Window | None):
     corrected, shadow, near_edge = prepare_shadow(bands, transform, bounds,
                                                   pixel_size_m, streets)
     records, sections, skipped = measure_gaps(corrected, transform, bounds, shadow,
-                                              near_edge, streets, lanes)
+                                              near_edge, streets, lanes, lane_mask)
     print(f"        {len(records)} cross-sections measured "
           f"({skipped['far']} lane too far from a road, "
           f"{skipped['shadow']} at a shadow edge, {skipped['unresolved']} unresolved)")

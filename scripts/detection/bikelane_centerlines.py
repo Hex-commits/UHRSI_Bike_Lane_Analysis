@@ -33,6 +33,18 @@ from scripts.detection.edge_trace import BikeLaneEdgeDetector, _binned_centerlin
 from scripts.detection.texture_detector import bike_lane_detector
 
 
+def load_lane_mask(mask_path, window: Window | None = None) -> np.ndarray:
+    """The cached lane detection as a boolean array on the tile grid.
+
+    The gap measurement needs the mask itself, not just the centrelines
+    derived from it: the lane's near edge is read off this directly, because
+    the spectral segmentation cannot resolve a lane/road boundary where both
+    are the same asphalt.
+    """
+    with rasterio.open(mask_path) as src:
+        return np.asarray(src.read(1, window=window)) > 0.5
+
+
 def lane_centerlines_from_mask(
     mask_path,
     window: Window | None = None,

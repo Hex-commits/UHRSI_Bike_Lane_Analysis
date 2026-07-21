@@ -35,6 +35,7 @@ from pipeline.config import (
 from scripts.detection.bikelane_centerlines import (
     detect_lane_centerlines,
     lane_centerlines_from_mask,
+    load_lane_mask,
 )
 from scripts.measurement.osm_road_surface import osm_road_surface
 from scripts.detection.texture_detector import bike_lane_detector, road_detector
@@ -159,12 +160,14 @@ def _bikelane_gap(figure_path: Path) -> dict:
     cached_mask = BIKELANE_MASK_PATHS.get(TILE_STEM)
     if USE_CACHED_BIKELANE_MASK and cached_mask and cached_mask.exists():
         lanes = lane_centerlines_from_mask(cached_mask, WINDOW)
+        lane_mask = load_lane_mask(cached_mask, WINDOW)
     else:
         lanes = detect_lane_centerlines(OUTPUT_TILE_PATH, WINDOW)
+        lane_mask = None
 
     corrected, shadow, near_edge = prepare_shadow(bands, transform, bounds, pixel_size_m, streets)
     records, _sections, _skipped = measure_gaps(corrected, transform, bounds, shadow,
-                                                near_edge, streets, lanes)
+                                                near_edge, streets, lanes, lane_mask)
     frame = gpd.GeoDataFrame(records, crs=TILE_CRS)
 
     aspect = WINDOW.width / WINDOW.height

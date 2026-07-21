@@ -96,7 +96,7 @@ def prepare_shadow(bands, transform, bounds, pixel_size_m, streets):
     return corrected, shadow, distance_to_boundary <= SHADOW_EDGE_MARGIN_M / pixel_size_m
 
 
-def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes):
+def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes, lane_mask=None):
     """One record per cross-section along every bike lane."""
     inverse = ~transform
     height, width = shadow.shape
@@ -138,7 +138,7 @@ def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes):
                                       lane_point.y - road_point.y]) / separation
                 section = measure(bands, inverse, (road_point.x, road_point.y), direction,
                                   -BEHIND_ROAD_M, separation + BEYOND_LANE_M,
-                                  shadow_mask=shadow)
+                                  shadow_mask=shadow, lane_mask=lane_mask)
                 sections.append(section)
 
                 lane_run = section.run_at(separation)
@@ -148,7 +148,16 @@ def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes):
 
                 if USE_OSM_ROAD_FALLBACK:
                     road_edge_m = road_width_m(street_highways[nearest_idx]) / 2.0
-                    lane_edge_m = lane_run.start_m
+                    # The lane's near edge comes from the detected lane mask,
+                    # not from `lane_run.start_m`. Where road and lane are the
+                    # same asphalt, segmentation merges them into one run whose
+                    # start is the profile's start, which collapsed every
+                    # separated cycle track to a spurious 0 m gap.
+                    mask_edge_m = section.lane_edge_m(separation)
+                    if mask_edge_m is None:
+                        skipped["unresolved"] += 1
+                        continue
+                    lane_edge_m = mask_edge_m
                     gap_m = max(lane_edge_m - road_edge_m, 0.0)
                     between = [r for r in section.runs
                                if r.end_m > road_edge_m and r.start_m < lane_edge_m and r is not lane_run]
@@ -228,7 +237,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     import matplotlib.pyplot as plt
     from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap
     from matplotlib.collections import LineCollection
-    from matplotlib.lines import Line2D
 
     surface, ink, muted = "#fcfcfb", "#0b0b0b", "#52514e"
     ramp = LinearSegmentedColormap.from_list("gap", ["#9ec5ef", "#2a78d6", "#0d2f56"])
@@ -292,15 +300,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
         bar.set_label("gap between road and bike lane (m)", color=muted, fontsize=10)
         bar.ax.tick_params(colors=muted, labelsize=9)
         bar.outline.set_edgecolor("#d8d7d2")
-
-    legend = ax.legend(handles=[
-        Line2D([], [], color=ramp(0.0), lw=4.0,
-               label="0 m — bike lane flush with the road"),
-    ], frameon=True, fontsize=9.5, labelcolor=ink, loc="lower left",
-        borderpad=0.7, handlelength=2.6)
-    legend.get_frame().set_facecolor(surface)
-    legend.get_frame().set_edgecolor("#d8d7d2")
-    legend.set_zorder(6)
 
     span_m = bands.shape[2] * pixel_size_m
     ax.set_title(f"Road-to-bike-lane gap\n"

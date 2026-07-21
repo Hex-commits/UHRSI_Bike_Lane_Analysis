@@ -7,7 +7,7 @@ pipeline change with:*
 uv run python -m scripts.diagnostics.generate_pipeline_report
 ```
 
-*Generated 2026-07-21 14:24 UTC from commit `c4daf3a`.*
+*Generated 2026-07-21 14:40 UTC from commit `7090105`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -122,8 +122,8 @@ coverage, when a detected surface is worse than a sensible per-class guess. The 
 ![bikelane gap](figures/10_bikelane_gap.png)
 
 **On this frame:** 61 of 72 cross-sections measured, 11 in
-shadow; median gap 0.00 m, and 77% with no separating strip
-at all (47 contiguous, 12 asphalt, 2 red paint). That most lanes read 0 m is the real picture of the district: most cycling
+shadow; median gap 2.90 m, and 28% with no separating strip
+at all (32 abutting, 17 contiguous, 12 asphalt). That most lanes read 0 m is the real picture of the district: most cycling
 infrastructure here is painted onto or flush with the road. A gap only opens up where a verge,
 buffer or paved strip physically separates the two -- those are the coloured stretches.
 
