@@ -12,7 +12,7 @@ from shapely import STRtree
 from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.ops import nearest_points
 
-from scripts.config import (
+from pipeline.config import (
     GAP_BEHIND_ROAD_M,
     GAP_BEYOND_LANE_M,
     GAP_MAP_BREAKS_M,
@@ -31,16 +31,16 @@ from scripts.config import (
     USE_OSM_ROAD_FALLBACK,
 )
 from scripts.detection.bikelane_centerlines import detect_lane_centerlines
-from scripts.detection.cross_section import (
+from scripts.measurement.cross_section import (
     ASPHALT,
     SHADOW_UNKNOWN,
     edge_precision_m,
     features,
     measure,
 )
-from scripts.detection.osm_road_surface import road_width_m
-from scripts.osm_features import fetch_osm_features
-from scripts.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
+from scripts.measurement.osm_road_surface import road_width_m
+from scripts.preprocessing.osm_features import fetch_osm_features
+from scripts.preprocessing.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
 
 _STEM = PIPELINE_TILE_STEMS[0]
 RAW_TILE = INPUT_TILES_DIR / f"{_STEM}.jp2"

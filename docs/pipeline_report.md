@@ -4,10 +4,10 @@
 pipeline change with:*
 
 ```bash
-uv run python -m scripts.generate_pipeline_report
+uv run python -m scripts.diagnostics.generate_pipeline_report
 ```
 
-*Generated 2026-07-21 14:07 UTC from commit `d29c156`.*
+*Generated 2026-07-21 14:24 UTC from commit `c4daf3a`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -96,7 +96,7 @@ Every stage below runs on the same fixed example region:
 ![road surface](figures/09_road_trace.png)
 
 **No width is measured here.** The surface is exactly the class-width buffer, so a width measured
-against it would only echo the assumption back -- so under this flag `scripts.detect_roads` skips
+against it would only echo the assumption back -- so under this flag `scripts.measurement.detect_roads` skips
 width measurement entirely and writes just the surface, no width map or GeoPackage. This is the
 region-of-interest-as-measurement trade the CNN path avoids on purpose; the fallback is kept only for
 coverage, when a detected surface is worse than a sensible per-class guess. The per-class widths in
@@ -106,7 +106,7 @@ coverage, when a detected surface is worse than a sensible per-class guess. The 
 
 ## 9. road-to-bike-lane gap
 
-- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
+- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
   the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
 - **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
   (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still

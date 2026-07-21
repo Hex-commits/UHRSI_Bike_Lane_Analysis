@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.config import (
+from pipeline.config import (
     BIKE_LANE_TEXTURE_LABELS,
     ROAD_TEXTURE_LABELS,
     TEXTURE_STRIDE_PX,
@@ -28,7 +28,7 @@ from scripts.config import (
     TEXTURES_DIR,
 )
 from scripts.detection.base import Detection
-from scripts.texture_embedding import discriminant_direction, embed_batch, load_references
+from scripts.detection.texture_embedding import discriminant_direction, embed_batch, load_references
 
 BATCH_SIZE = 64
 

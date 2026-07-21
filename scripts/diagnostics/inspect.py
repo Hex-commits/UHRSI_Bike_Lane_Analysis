@@ -24,7 +24,7 @@ def describe_tile(path: Path) -> None:
 def main() -> None:
     paths = [Path(p) for p in sys.argv[1:]]
     if not paths:
-        from scripts.config import OUTPUT_DIR
+        from pipeline.config import OUTPUT_DIR
 
         paths = sorted(OUTPUT_DIR.glob("*.tif"))
 

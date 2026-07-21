@@ -8,7 +8,7 @@ figure per stage, ending with the road-to-bike-lane gap. Scoped to a small regio
 rather than a full tile so it takes under a minute (a full-tile CNN scan takes
 20+ minutes), making "regenerate after every change" practical:
 
-    uv run python -m scripts.generate_pipeline_report
+    uv run python -m scripts.diagnostics.generate_pipeline_report
 """
 
 import subprocess
@@ -23,7 +23,8 @@ from rasterio.windows import Window
 from scipy.ndimage import label
 from shapely.geometry import box
 
-from scripts.config import (
+from pipeline.config import (
+    PROJECT_ROOT,
     BIKELANE_MASK_PATHS,
     INPUT_TILES_DIR,
     OUTPUT_DIR,
@@ -35,18 +36,17 @@ from scripts.detection.bikelane_centerlines import (
     detect_lane_centerlines,
     lane_centerlines_from_mask,
 )
-from scripts.detection.osm_road_surface import osm_road_surface
+from scripts.measurement.osm_road_surface import osm_road_surface
 from scripts.detection.texture_detector import bike_lane_detector, road_detector
-from scripts.measure_bikelane_gap import load_chunk, measure_gaps, prepare_shadow, render_map
-from scripts.osm_features import fetch_osm_features
-from scripts.texture_analysis import visualize_edge_trace, visualize_scan
+from scripts.measurement.measure_bikelane_gap import load_chunk, measure_gaps, prepare_shadow, render_map
+from scripts.preprocessing.osm_features import fetch_osm_features
+from scripts.diagnostics.texture_analysis import visualize_edge_trace, visualize_scan
 
 TILE_STEM = "idop20rgbi_32_404_5757_1_nw_2025"
 RAW_TILE_PATH = INPUT_TILES_DIR / f"{TILE_STEM}.jp2"
 OUTPUT_TILE_PATH = OUTPUT_DIR / f"{TILE_STEM}_bikelanes.tif"
 WINDOW = Window(4300, 1330, 750, 180)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FIGURES_DIR = PROJECT_ROOT / "docs" / "figures"
 REPORT_PATH = PROJECT_ROOT / "docs" / "pipeline_report.md"
 
@@ -146,7 +146,7 @@ def _road_figure(figure_path: Path) -> tuple[int, int, bool]:
 def _bikelane_gap(figure_path: Path) -> dict:
     """Run the 1-D gap measurement on the report window and render its map.
 
-    Reuses `scripts.measure_bikelane_gap` end to end -- the same code the
+    Reuses `scripts.measurement.measure_bikelane_gap` end to end -- the same code the
     standalone tool runs -- so this figure can never drift from the tool.
     Scoped to the report's fixed WINDOW like every other stage: roads come from
     OSM, but the bike lanes are detected from the imagery (not OSM), the same
@@ -199,7 +199,7 @@ def _section_9(road_surface_px: int, road_components: int, road_is_osm: bool) ->
 ![road surface](figures/09_road_trace.png)
 
 **No width is measured here.** The surface is exactly the class-width buffer, so a width measured
-against it would only echo the assumption back -- so under this flag `scripts.detect_roads` skips
+against it would only echo the assumption back -- so under this flag `scripts.measurement.detect_roads` skips
 width measurement entirely and writes just the surface, no width map or GeoPackage. This is the
 region-of-interest-as-measurement trade the CNN path avoids on purpose; the fallback is kept only for
 coverage, when a detected surface is worse than a sensible per-class guess. The per-class widths in
@@ -236,7 +236,7 @@ directly, and it is why widths measured against this surface come out biased wid
 resolution is 4.4 m, and its score ramps over ~5 m across a real road edge rather than stepping at
 it. It answers "is there road here", not "where does it end", and any width read off its shape would
 be measuring the scan grid. Road widths are measured from OSM centerlines by
-`scripts.detect_roads` -- see "Road detection" in `README.md`.
+`scripts.measurement.detect_roads` -- see "Road detection" in `README.md`.
 
 The colour test and morphology that used to sit here were removed after being measured: the colour
 test discarded two thirds of its own region of interest and left 138 fragments, and every cleanup
@@ -246,7 +246,7 @@ step after it moved the boundary a width would be taken from."""
 def _gap_bullets(road_is_osm: bool) -> str:
     """Section 9's intro bullets, reflecting where the road edge comes from."""
     if road_is_osm:
-        return """- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
+        return """- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
   the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
 - **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
   (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still
@@ -259,7 +259,7 @@ def _gap_bullets(road_is_osm: bool) -> str:
   reaches the lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM,
   which shadow cannot obscure, so nothing is withheld as unmeasurable"""
 
-    return """- **Orchestrator:** `scripts.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
+    return """- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
   the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
   `README.md`
 - **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask on the left of step 9 is
@@ -285,7 +285,7 @@ def _write_report(road_surface_px: int, road_components: int,
 pipeline change with:*
 
 ```bash
-uv run python -m scripts.generate_pipeline_report
+uv run python -m scripts.diagnostics.generate_pipeline_report
 ```
 
 *Generated {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")} from commit `{_git_commit()}`.*

@@ -28,7 +28,7 @@ result is worth being able to reproduce. The annotations themselves, and
 
 from ultralytics import YOLO
 
-from scripts.config import (
+from pipeline.config import (
     ANNOTATIONS_DIR,
     DETECTION_INPUT_DIR,
     TRAINING_CHIP_OVERLAP_PX,

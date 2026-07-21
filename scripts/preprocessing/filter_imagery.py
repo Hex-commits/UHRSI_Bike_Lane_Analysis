@@ -17,7 +17,7 @@ from scipy.ndimage import binary_dilation
 from shapely.geometry.base import BaseGeometry
 from skimage.morphology import disk
 
-from scripts.config import (
+from pipeline.config import (
     APPLY_RED_BOOST,
     BIKE_LANE_LABEL,
     NODATA_VALUE,
@@ -27,9 +27,9 @@ from scripts.config import (
     SHADOW_LABEL,
     STREET_LABEL,
 )
-from scripts.mask import rasterize_mask
-from scripts.redness import boost_red_saturation
-from scripts.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
+from scripts.preprocessing.mask import rasterize_mask
+from scripts.preprocessing.redness import boost_red_saturation
+from scripts.preprocessing.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
 
 _ORIGINAL_RGBI_COLORINTERP = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.undefined)
 

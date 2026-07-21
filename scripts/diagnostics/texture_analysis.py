@@ -10,26 +10,26 @@ detector -- not part of the production pipeline. Three things live here:
   similar (0.87) than bikelane vs bikelane (0.85), the overlap
   `discriminant_score` routes around):
 
-      uv run python -m scripts.texture_analysis
+      uv run python -m scripts.diagnostics.texture_analysis
 
 - `visualize_scan` -- sliding-window detector over one region, saved as a
   3-panel PNG (RGB | score heatmap | thresholded mask). Slow (~90s for
   ~870x580 on MPS), for eyeballing a specific region:
 
-      uv run python -m scripts.texture_analysis data/output/foo.tif 80 1990 870 580
+      uv run python -m scripts.diagnostics.texture_analysis data/output/foo.tif 80 1990 870 580
 
 - `visualize_edge_trace` -- coarse CNN detector then edge_trace.py's color
   tracer over one region; 3-panel PNG (RGB | coarse block mask | traced mask)
   plus width stats from the traced mask (the coarse mask's shape is the scan
   window's footprint, not the lane's):
 
-      uv run python -m scripts.texture_analysis edges data/output/foo.tif 80 1990 870 580
+      uv run python -m scripts.diagnostics.texture_analysis edges data/output/foo.tif 80 1990 870 580
 
   `road` mode shows RoadEdgeDetector instead -- now just the thresholded CNN
   mask, so its right-hand panels are near-identical and no width is printed
-  (road width comes from OSM centerlines in `scripts.detect_roads`):
+  (road width comes from OSM centerlines in `scripts.measurement.detect_roads`):
 
-      uv run python -m scripts.texture_analysis road data/output/foo.tif 80 1990 870 580
+      uv run python -m scripts.diagnostics.texture_analysis road data/output/foo.tif 80 1990 870 580
 """
 
 import sys
@@ -41,11 +41,11 @@ import rasterio
 from PIL import Image
 from rasterio.windows import Window
 
-from scripts.config import TEXTURE_STRIDE_PX, TEXTURES_DIR
+from pipeline.config import TEXTURE_STRIDE_PX, TEXTURES_DIR
 from scripts.detection.base import Detection
 from scripts.detection.edge_trace import BikeLaneEdgeDetector, RoadEdgeDetector
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
-from scripts.texture_embedding import cosine_similarity, load_references
+from scripts.detection.texture_embedding import cosine_similarity, load_references
 
 
 SEGMENT_COLORS = [
@@ -227,10 +227,10 @@ def main() -> None:
 
     if len(args) not in (5, 6):
         print("Usage:")
-        print("  uv run python -m scripts.texture_analysis                                          # pairwise reference report")
-        print("  uv run python -m scripts.texture_analysis <tile.tif> <x> <y> <w> <h> [stride_px]        # scan + visualize a region")
-        print("  uv run python -m scripts.texture_analysis edges <tile.tif> <x> <y> <w> <h> [stride_px]  # coarse + edge-trace + width")
-        print("  uv run python -m scripts.texture_analysis road <tile.tif> <x> <y> <w> <h> [stride_px]   # the same, for road surface")
+        print("  uv run python -m scripts.diagnostics.texture_analysis                                          # pairwise reference report")
+        print("  uv run python -m scripts.diagnostics.texture_analysis <tile.tif> <x> <y> <w> <h> [stride_px]        # scan + visualize a region")
+        print("  uv run python -m scripts.diagnostics.texture_analysis edges <tile.tif> <x> <y> <w> <h> [stride_px]  # coarse + edge-trace + width")
+        print("  uv run python -m scripts.diagnostics.texture_analysis road <tile.tif> <x> <y> <w> <h> [stride_px]   # the same, for road surface")
         print()
         print(f"  stride_px overrides TEXTURE_STRIDE_PX (config.py, default {TEXTURE_STRIDE_PX}) for this run")
         print("  only -- smaller means a finer-resolution scan (more overlapping sample points), at")

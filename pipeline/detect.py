@@ -1,7 +1,7 @@
 """The detection pipeline, end to end. Its final product is the bike-lane gap.
 
-    uv run python -m scripts.detect                       # every PIPELINE_TILE_STEMS tile
-    uv run python -m scripts.detect 1600 1600 1600 1600   # one window: col row w h
+    uv run python -m pipeline.detect                       # every PIPELINE_TILE_STEMS tile
+    uv run python -m pipeline.detect 1600 1600 1600 1600   # one window: col row w h
 
 This replaces the YOLO-seg pipeline that used to live in `detect.py` at the
 repository root. That one chipped each tile, ran a fine-tuned YOLO-seg model
@@ -39,7 +39,7 @@ import time
 import geopandas as gpd
 from rasterio.windows import Window
 
-from scripts.config import (
+from pipeline.config import (
     BIKELANE_MASK_PATHS,
     DETECTION_OUTPUT_PATH,
     GAP_MAP_PATH,
@@ -55,13 +55,13 @@ from scripts.detection.bikelane_centerlines import (
     detect_lane_centerlines,
     lane_centerlines_from_mask,
 )
-from scripts.measure_bikelane_gap import (
+from scripts.measurement.measure_bikelane_gap import (
     load_chunk,
     measure_gaps,
     prepare_shadow,
     render_map,
 )
-from scripts.osm_features import fetch_osm_features
+from scripts.preprocessing.osm_features import fetch_osm_features
 from shapely.geometry import box
 
 

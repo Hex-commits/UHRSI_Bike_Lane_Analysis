@@ -1,8 +1,8 @@
-from scripts.config import BIKE_LANE_BUFFER_METERS, OUTPUT_DIR, STREET_BUFFER_METERS
-from scripts.filter_imagery import filter_tile
-from scripts.mask import buffer_by_category
-from scripts.osm_features import fetch_osm_features
-from scripts.tiles import find_tile_paths, union_bounds
+from pipeline.config import BIKE_LANE_BUFFER_METERS, OUTPUT_DIR, STREET_BUFFER_METERS
+from scripts.preprocessing.filter_imagery import filter_tile
+from scripts.preprocessing.mask import buffer_by_category
+from scripts.preprocessing.osm_features import fetch_osm_features
+from scripts.preprocessing.tiles import find_tile_paths, union_bounds
 
 
 def main():

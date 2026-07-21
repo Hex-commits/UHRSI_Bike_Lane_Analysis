@@ -7,7 +7,7 @@ import osmnx as ox
 from pyproj import Transformer
 from shapely.geometry import box
 
-from scripts.config import (
+from pipeline.config import (
     BIKE_LANE_CYCLEWAY_VALUES,
     OSM_CACHE_PATH,
     OSM_CRS,

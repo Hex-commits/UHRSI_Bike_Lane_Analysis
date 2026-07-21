@@ -4,7 +4,7 @@ from pathlib import Path
 
 import rasterio
 
-from scripts.config import INPUT_TILES_DIR
+from pipeline.config import INPUT_TILES_DIR
 
 
 def find_tile_paths(tiles_dir: Path = INPUT_TILES_DIR, pattern: str = "*.jp2") -> list[Path]:

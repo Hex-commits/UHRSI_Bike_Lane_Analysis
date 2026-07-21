@@ -28,7 +28,7 @@ from rasterio.windows import Window
 from scipy.ndimage import label
 from shapely.geometry import LineString
 
-from scripts.config import MIN_LANE_COMPONENT_PX, TILE_CRS
+from pipeline.config import MIN_LANE_COMPONENT_PX, TILE_CRS
 from scripts.detection.edge_trace import BikeLaneEdgeDetector, _binned_centerline
 from scripts.detection.texture_detector import bike_lane_detector
 

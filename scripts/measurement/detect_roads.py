@@ -1,8 +1,8 @@
 """Run the road detector over a whole tile (or one window of it) and write results.
 
-    uv run python -m scripts.detect_roads data/output/foo.tif             # whole tile
-    uv run python -m scripts.detect_roads data/output/foo.tif 22          # whole tile, coarser scan
-    uv run python -m scripts.detect_roads data/output/foo.tif 11 0 0 1500 1500   # one window
+    uv run python -m scripts.measurement.detect_roads data/output/foo.tif             # whole tile
+    uv run python -m scripts.measurement.detect_roads data/output/foo.tif 22          # whole tile, coarser scan
+    uv run python -m scripts.measurement.detect_roads data/output/foo.tif 11 0 0 1500 1500   # one window
 
 Writes a GeoPackage of per-OSM-way road widths, a width-colored map over the
 imagery, and the traced surface as both an overlay and a mask. Width is
@@ -37,15 +37,15 @@ from PIL import Image, ImageDraw
 from rasterio.windows import Window
 from shapely.geometry import box
 
-from scripts.config import TEXTURE_STRIDE_PX, TILE_CRS, USE_OSM_ROAD_FALLBACK
-from scripts.detection.centerline_width import _iter_lines, aggregate, measure_along_centerline
+from pipeline.config import PROJECT_ROOT, TEXTURE_STRIDE_PX, TILE_CRS, USE_OSM_ROAD_FALLBACK
+from scripts.measurement.centerline_width import _iter_lines, aggregate, measure_along_centerline
 from scripts.detection.edge_trace import RoadEdgeDetector
-from scripts.detection.osm_road_surface import osm_road_surface
+from scripts.measurement.osm_road_surface import osm_road_surface
 from scripts.detection.texture_detector import road_detector
-from scripts.osm_features import fetch_osm_features
-from scripts.texture_analysis import SEGMENT_COLORS
+from scripts.preprocessing.osm_features import fetch_osm_features
+from scripts.diagnostics.texture_analysis import SEGMENT_COLORS
 
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "detections"
+OUTPUT_DIR = PROJECT_ROOT / "data" / "detections"
 
 SHADOW_BAND = 6
 

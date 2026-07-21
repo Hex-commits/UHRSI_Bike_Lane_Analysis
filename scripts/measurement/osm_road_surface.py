@@ -19,7 +19,7 @@ import numpy as np
 from rasterio.features import rasterize
 from rasterio.transform import Affine
 
-from scripts.config import OSM_ROAD_DEFAULT_WIDTH_FALLBACK_M, OSM_ROAD_DEFAULT_WIDTH_M
+from pipeline.config import OSM_ROAD_DEFAULT_WIDTH_FALLBACK_M, OSM_ROAD_DEFAULT_WIDTH_M
 
 
 def road_width_m(highway) -> float:
