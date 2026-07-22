@@ -28,15 +28,15 @@ from pipeline.config import (
     GAP_TANGENT_HALF_SPAN_M,
     BIKELANE_MASK_PATHS,
     USE_CACHED_BIKELANE_MASK,
-    INPUT_TILES_DIR,
     OUTPUT_DIR as PREFILTERED_DIR,
     PIPELINE_TILE_STEMS,
     PROJECT_ROOT,
     TILE_CRS,
     USE_OSM_ROAD_FALLBACK,
+    raw_tile_path,
 )
 from scripts.detection.bikelane_centerlines import (
-    detect_lane_centerlines,
+    detect_lanes,
     lane_centerlines_from_mask,
     load_lane_mask,
 )
@@ -52,9 +52,15 @@ from scripts.preprocessing.osm_features import fetch_osm_features
 from scripts.preprocessing.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
 
 _STEM = PIPELINE_TILE_STEMS[0]
-RAW_TILE = INPUT_TILES_DIR / f"{_STEM}.jp2"
+RAW_TILE = raw_tile_path(_STEM)
 PREFILTERED_TILE = PREFILTERED_DIR / f"{_STEM}_bikelanes.tif"
 OUTPUT_DIR = GAP_OUTPUT_PATH.parent
+
+# The two things the maps draw flat, module-level so every figure that shows a
+# detected lane uses the same colour. The diagnostics edge-trace panel imports
+# LANE_COLOR from here rather than keeping its own copy, so the report's
+# figures cannot drift apart from the gap map's.
+ROAD_COLOR, LANE_COLOR = "#eda100", "#008300"
 
 # Every tunable lives in config.py; these are module-local aliases so the
 # code below reads in metres rather than in config lookups.
@@ -321,7 +327,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     # clears the dimmed basemap at 2.9:1.
     RAMP_STEPS = ["#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]
     ramp = LinearSegmentedColormap.from_list("gap", RAMP_STEPS)
-    ROAD_COLOR, LANE_COLOR = "#eda100", "#008300"
 
     inverse = ~transform
     preview_scale = min(1.0, 2200 / max(bands.shape[1], bands.shape[2]))
@@ -464,8 +469,7 @@ def main() -> None:
         lanes = lane_centerlines_from_mask(cached_mask, window)
         lane_mask = load_lane_mask(cached_mask, window)
     else:
-        lanes = detect_lane_centerlines(PREFILTERED_TILE, window)
-        lane_mask = None
+        lanes, lane_mask = detect_lanes(PREFILTERED_TILE, window)
     print(f"roads: {len(streets)} OSM street way(s); "
           f"bike lanes: {len(lanes)} detected from imagery (not OSM)")
     if USE_OSM_ROAD_FALLBACK:

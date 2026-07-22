@@ -4,9 +4,82 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# --- The chunk the pipeline runs on -----------------------------------------
+#
+# The one path to change when pointing the pipeline at new imagery. Both
+# stages derive from it: preprocessing masks this file, and detection reads
+# the stem back to find its prefiltered counterpart in OUTPUT_DIR. It does not
+# have to sit in INPUT_TILES_DIR -- that directory is the 2025 tile archive,
+# and a chunk delivered on its own can live anywhere under data/input/.
+INPUT_CHUNK_PATH = PROJECT_ROOT / "data" / "input" / "dop10rgbi_32_406_5758_1_nw_2026.jp2"
+
 INPUT_TILES_DIR = PROJECT_ROOT / "data" / "input" / "idop_kacheln"
 OSM_CACHE_PATH = PROJECT_ROOT / "data" / "osm" / "osm_features.gpkg"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
+
+
+def raw_tile_path(stem: str) -> Path:
+    """The raw imagery a pipeline tile stem was read from.
+
+    The configured chunk wins; anything else is looked up in the tile archive,
+    so a stem from an earlier run (the diagnostics report pins one) still
+    resolves after INPUT_CHUNK_PATH moves on.
+    """
+    if stem == INPUT_CHUNK_PATH.stem:
+        return INPUT_CHUNK_PATH
+    return INPUT_TILES_DIR / f"{stem}.jp2"
+
+
+# --- Ground scale ------------------------------------------------------------
+#
+# Every *_PX constant below (and in detection/edge_trace.py) was swept against
+# 20 cm/px imagery, and each one encodes a ground distance rather than a pixel
+# count: TEXTURE_WINDOW_PX is "4.4 m of context", MIN_LANE_COMPONENT_PX is
+# "8 m^2 of lane". Feeding those literals to a 10 cm chunk would silently halve
+# every one of those distances -- the texture window would cover 2.2 m, barely
+# a lane's width, and the detector would be looking at the wrong scale without
+# ever raising an error.
+#
+# So the literals are stated at the resolution they were tuned at and scaled to
+# whatever the chunk actually is. The texture window survives this because
+# texture_embedding resizes every window to INPUT_SIZE_PX before the backbone
+# sees it: what the CNN keys on is the window's ground extent, not its pixel
+# count. Purely dimensionless tunables (hue tolerance, the bridge alignment
+# cosine, ratios) are scale-free and are left alone.
+TUNED_AT_M = 0.2
+
+
+def pixel_size_m(path: Path, default: float = TUNED_AT_M) -> float:
+    """`path`'s ground resolution, or `default` if it cannot be read.
+
+    Falls back rather than raising: config is imported by every entry point,
+    including ones that never touch the chunk, and a missing file should not
+    stop `--help` from running.
+    """
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            return float(src.res[0])
+    except Exception:
+        return default
+
+
+INPUT_CHUNK_RES_M = pixel_size_m(INPUT_CHUNK_PATH)
+
+# >1 when the chunk is finer than the imagery the constants were swept on.
+PX_SCALE = TUNED_AT_M / INPUT_CHUNK_RES_M
+
+
+def scaled_px(pixels_at_tuned_res: float) -> int:
+    """A tuned *length* in pixels, restated for the chunk's resolution."""
+    return max(1, round(pixels_at_tuned_res * PX_SCALE))
+
+
+def scaled_area_px(pixels_at_tuned_res: float) -> int:
+    """A tuned *area* in pixels, restated for the chunk's resolution."""
+    return max(1, round(pixels_at_tuned_res * PX_SCALE**2))
+
 
 TEXTURES_DIR = PROJECT_ROOT / "data" / "input" / "textures"
 
@@ -84,12 +157,53 @@ YOLO_SEG_TRAINED_WEIGHTS_PATH = PROJECT_ROOT / "runs" / "segment" / "train" / "w
 DETECTION_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelanes.gpkg"
 
 
-TEXTURE_WINDOW_PX = 22
+# The scan window's ground extent. Stated in metres, not pixels, because that
+# is what the detector actually sees: texture_embedding resizes every window
+# to INPUT_SIZE_PX before the backbone reads it, so the pixel count sets how
+# much detail survives while this sets how much *ground* is being judged.
+#
+# The original 4.4 m (22 px at 0.2 m/px) was forced by resolution rather than
+# chosen for lanes: at 0.2 m/px a 2.2 m window is 11 px, too little to carry
+# texture. At 0.1 m/px that same 2.2 m is 22 px -- the pixel count the
+# detector was tuned at -- so the window can finally match a real ~2 m lane
+# instead of spanning it plus whatever lies either side.
+#
+# That mismatch was measurable. Every reference crop is >=90% lane paint,
+# while a 4.4 m window centred on a 2 m lane is at most ~45% paint: the
+# references and the windows being scored against them were describing
+# different things, and lane recall sat at 62%.
+TEXTURE_WINDOW_M = 2.2
+TEXTURE_WINDOW_PX = max(1, round(TEXTURE_WINDOW_M / INPUT_CHUNK_RES_M))
 
 BIKE_LANE_TEXTURE_LABELS = ("bikelane", ("negative",))
 ROAD_TEXTURE_LABELS = ("road", ("bikelane", "negative"))
 
-TEXTURE_STRIDE_PX = 11
+# Half the window: 50% overlap between neighbouring scans. Halving the window
+# therefore quadruples the window count -- a full-tile scan goes from ~76k
+# windows to ~300k -- which is the price of the match above.
+TEXTURE_STRIDE_PX = max(1, TEXTURE_WINDOW_PX // 2)
+
+# How far the coarse mask is allowed to bridge along a line before tracing.
+#
+# The scan fires on 99% of windows centred on lane interior (measured along a
+# 319 m painted run) and correctly refuses windows straddling a lane edge,
+# which are half asphalt. The grid is anchored to the image, so a lane running
+# across it drifts in and out of alignment and detections switch off in bands
+# even where the lane is continuous and confirmed either side. Those gaps are
+# a sampling artifact, which is what makes closing them legitimate rather than
+# wishful.
+#
+# Measured on the report window: 2 m closes the artifact gaps (which run 1-2
+# windows) for +16% mask area, 4 m gives +31% and merges 10 more components.
+# The extra reach also welds *false* positives into larger connected masses --
+# closing cannot tell a wrong detection from a right one -- so this buys
+# continuity at the cost of making any error more prominent.
+COARSE_BRIDGE_M = 4.0
+
+# Orientations the line element is swept through. A line closes gaps along its
+# own direction and leaves everything else alone; a disk would fatten the mask
+# isotropically and merge a lane into the kerb beside it.
+COARSE_BRIDGE_ORIENTATIONS = 12
 
 
 USE_OSM_ROAD_FALLBACK = True
@@ -112,14 +226,15 @@ OSM_ROAD_DEFAULT_WIDTH_FALLBACK_M = 6.0
 
 # --- Bike-lane gap: the pipeline's final product (scripts/detect.py) ---
 
-# Tiles the pipeline runs over. Each is read twice, from two different
-# versions of itself: lane *detection* runs on the prefiltered output
-# (data/output/), because the edge tracer keys on red-boosted paint, while
-# every gap *distance* is measured on the raw input tile, whose pixels no
-# buffer mask has touched. Measuring on the prefiltered tile would put an
-# artificial edge exactly where a lane's outer boundary sits.
+# Tiles the pipeline runs over -- the configured chunk, which is why
+# INPUT_CHUNK_PATH is the only path anyone has to edit. Each is read twice,
+# from two different versions of itself: lane *detection* runs on the
+# prefiltered output (data/output/), because the edge tracer keys on
+# red-boosted paint, while every gap *distance* is measured on the raw input
+# tile, whose pixels no buffer mask has touched. Measuring on the prefiltered
+# tile would put an artificial edge exactly where a lane's outer boundary sits.
 PIPELINE_TILE_STEMS = [
-    "idop20rgbi_32_404_5757_1_nw_2025",
+    INPUT_CHUNK_PATH.stem,
 ]
 
 # Spacing of cross-sections along a detected lane, and the span either side
@@ -214,5 +329,6 @@ BIKELANE_MASK_PATHS = {
 
 # Connected components smaller than this are dropped before reducing a mask
 # to centerlines. At 0.2 m/px, 200 px is 8 m^2 -- below a real lane fragment,
-# above the speckle the edge tracer leaves behind.
-MIN_LANE_COMPONENT_PX = 200
+# above the speckle the edge tracer leaves behind. Scaled as an area, so the
+# 8 m^2 threshold holds at any resolution.
+MIN_LANE_COMPONENT_PX = scaled_area_px(200)

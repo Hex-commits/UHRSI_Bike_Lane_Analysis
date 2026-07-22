@@ -32,7 +32,18 @@ from scripts.detection.texture_embedding import discriminant_direction, embed_ba
 
 BATCH_SIZE = 64
 
-SCORE_THRESHOLD = 0.10
+# Calibrated against config.TEXTURE_WINDOW_M -- change one and this must be
+# re-swept. Narrowing the window from 4.4 m to 2.2 m shifted the whole score
+# distribution down (lane mean +0.150 -> +0.031), so the old +0.10 kept only
+# 34% of true lane windows. Measured on 160 held-out windows per class at
+# 0.1 m/px: -0.10 recovers 69% recall with 0% false positives on both road and
+# roadside verge; -0.15 reaches 79% but starts admitting road.
+#
+# The narrow window is what makes a threshold this loose safe. At 4.4 m the
+# roadside verge scored +0.079, a hair under the old threshold -- dropping to
+# +0.05 there put false positives at 92%. At 2.2 m the same surface sits at
+# -0.115, so there is real margin below the operating point rather than a cliff.
+SCORE_THRESHOLD = -0.10
 
 ROAD_SCORE_THRESHOLD = 0.18
 

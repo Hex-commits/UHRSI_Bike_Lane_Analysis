@@ -47,8 +47,11 @@ from scripts.detection.base import Detection
 from scripts.detection.edge_trace import BikeLaneEdgeDetector, RoadEdgeDetector
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
 from scripts.detection.texture_embedding import cosine_similarity, load_references
+from scripts.measurement.measure_bikelane_gap import LANE_COLOR
 
 
+# Only the road panel still uses this; bike lanes draw in the gap map's
+# LANE_COLOR so the two figures agree on what a detected lane looks like.
 SEGMENT_COLORS = [
     (0, 255, 255),
     (255, 0, 255),
@@ -57,6 +60,12 @@ SEGMENT_COLORS = [
     (255, 120, 0),
     (120, 160, 255),
 ]
+
+
+def _rgb(hex_color: str) -> tuple[int, int, int]:
+    """"#rrggbb" -> (r, g, b), for blending against a uint8 image."""
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def pairwise_similarities(references: dict[str, dict[str, "object"]]) -> list[tuple[str, str, float]]:
@@ -203,13 +212,13 @@ def visualize_edge_trace(
 
     coarse_panel = overlay(coarse_mask, (0.0, 255.0, 0.0))
 
+    # One flat colour for every traced lane, matching the gap map's lane green
+    # rather than tinting each component separately. Per-component colours read
+    # as if they encoded something; they only ever encoded size rank, and
+    # shuffled from run to run as components changed.
     traced_panel = image.astype(np.float32)
-    if surface == "road":
-        traced_panel[traced_mask] = traced_panel[traced_mask] * 0.45 + np.array(SEGMENT_COLORS[0]) * 0.55
-    else:
-        for i, detection in enumerate(sorted(edge_detections, key=lambda d: -d.mask.sum())):
-            color = np.array(SEGMENT_COLORS[i % len(SEGMENT_COLORS)], dtype=np.float32)
-            traced_panel[detection.mask] = traced_panel[detection.mask] * 0.45 + color * 0.55
+    color = np.array(SEGMENT_COLORS[0] if surface == "road" else _rgb(LANE_COLOR), dtype=np.float32)
+    traced_panel[traced_mask] = traced_panel[traced_mask] * 0.45 + color * 0.55
     traced_panel = np.clip(traced_panel, 0, 255).astype(np.uint8)
 
     stack_panels([image, coarse_panel, traced_panel], output_path)

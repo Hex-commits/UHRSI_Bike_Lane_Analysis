@@ -1,12 +1,12 @@
 """Generate a visual, stage-by-stage walkthrough of the pipeline for writeups.
 
-Runs one fixed, validated example region (tile 404_5757, the window used
-throughout development) through every stage -- raw imagery, OSM masking,
-shadow detection, red boost, prefiltered output, CNN texture scan, edge
+Runs one fixed example region (`REPORT_BOUNDS`, in CRS metres) of the
+configured chunk through every stage -- raw imagery, OSM masking, shadow
+detection, red boost, prefiltered output, CNN texture scan, edge
 tracing/regularization/bridging -- and writes docs/pipeline_report.md with one
 figure per stage, ending with the road-to-bike-lane gap. Scoped to a small region
-rather than a full tile so it takes under a minute (a full-tile CNN scan takes
-20+ minutes), making "regenerate after every change" practical:
+rather than a full tile so it stays quick (a full-tile CNN scan takes 20+
+minutes), making "regenerate after every change" practical:
 
     uv run python -m scripts.diagnostics.generate_pipeline_report
 """
@@ -19,7 +19,7 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 from PIL import Image
-from rasterio.windows import Window
+from rasterio.windows import Window, from_bounds
 from scipy.ndimage import label
 from shapely.geometry import box
 
@@ -27,14 +27,16 @@ from pipeline.config import (
     PROJECT_ROOT,
     BIKELANE_MASK_PATHS,
     GAP_MAP_SHOW_ROAD,
-    INPUT_TILES_DIR,
+    INPUT_CHUNK_RES_M,
     OUTPUT_DIR,
+    PIPELINE_TILE_STEMS,
     TILE_CRS,
     USE_CACHED_BIKELANE_MASK,
     USE_OSM_ROAD_FALLBACK,
+    raw_tile_path,
 )
 from scripts.detection.bikelane_centerlines import (
-    detect_lane_centerlines,
+    detect_lanes,
     lane_centerlines_from_mask,
     load_lane_mask,
 )
@@ -44,10 +46,42 @@ from scripts.measurement.measure_bikelane_gap import load_chunk, measure_gaps, p
 from scripts.preprocessing.osm_features import fetch_osm_features
 from scripts.diagnostics.texture_analysis import stack_panels, visualize_edge_trace, visualize_scan
 
-TILE_STEM = "idop20rgbi_32_404_5757_1_nw_2025"
-RAW_TILE_PATH = INPUT_TILES_DIR / f"{TILE_STEM}.jp2"
+# The report runs on whatever INPUT_CHUNK_PATH is, never a tile pinned here.
+# The *_PX detection constants are scaled to that chunk's resolution (see
+# config.TUNED_AT_M), so figures generated from any other imagery would come
+# out of a texture window covering the wrong ground extent -- and nothing
+# about them would look wrong.
+TILE_STEM = PIPELINE_TILE_STEMS[0]
+RAW_TILE_PATH = raw_tile_path(TILE_STEM)
 OUTPUT_TILE_PATH = OUTPUT_DIR / f"{TILE_STEM}_bikelanes.tif"
-WINDOW = Window(4300, 1330, 750, 180)
+
+# Quoted in the report body. Derived, not written out: the chunk need not live
+# in the tile archive, and the report claimed `data/input/idop_kacheln/...` for
+# a file that sits directly in `data/input/`.
+RAW_TILE_REL = RAW_TILE_PATH.relative_to(PROJECT_ROOT)
+
+# The worked example's extent, as (left, bottom, right, top) in TILE_CRS
+# metres. Geographic rather than a pixel Window on purpose: the same pixel
+# offsets frame different ground at every resolution, and on a different tile
+# they frame unrelated ground entirely. The previous
+# Window(4300, 1330, 750, 180) picked out a cycle track on the 20 cm tile
+# 404_5757 and meant nothing anywhere else.
+REPORT_BOUNDS = (
+    406537.8249676815,
+    5758617.074135774,
+    406712.8249676815,
+    5758792.074135774,
+)
+
+
+def _report_window() -> Window:
+    """`REPORT_BOUNDS` as a whole-pixel window on the configured chunk."""
+    with rasterio.open(RAW_TILE_PATH) as src:
+        window = from_bounds(*REPORT_BOUNDS, transform=src.transform)
+    return window.round_offsets().round_lengths()
+
+
+WINDOW = _report_window()
 
 FIGURES_DIR = PROJECT_ROOT / "docs" / "figures"
 REPORT_PATH = PROJECT_ROOT / "docs" / "pipeline_report.md"
@@ -155,12 +189,20 @@ def _bikelane_gap(figure_path: Path) -> dict:
         lanes = lane_centerlines_from_mask(cached_mask, WINDOW)
         lane_mask = load_lane_mask(cached_mask, WINDOW)
     else:
-        lanes = detect_lane_centerlines(OUTPUT_TILE_PATH, WINDOW)
-        lane_mask = None
+        lanes, lane_mask = detect_lanes(OUTPUT_TILE_PATH, WINDOW)
 
     corrected, shadow, near_edge = prepare_shadow(bands, transform, bounds, pixel_size_m, streets)
     records, _sections, _skipped = measure_gaps(corrected, transform, bounds, shadow,
                                                 near_edge, streets, lanes, lane_mask)
+    # An empty result is a finding about the region, not a crash: constructing
+    # a GeoDataFrame from [] raises for want of a geometry column, which turned
+    # "no gaps measurable here" into a failed report run.
+    if not records:
+        print(f"  no gaps measured in the report window ({len(lanes)} lane(s), "
+              f"{len(streets)} street(s)); skipping figure {figure_path.name}")
+        return {"measured": 0, "total": 0, "in_shadow": 0,
+                "median_gap_m": float("nan"), "no_strip_pct": 0.0, "composition": {}}
+
     frame = gpd.GeoDataFrame(records, crs=TILE_CRS)
 
     render_map(bands, transform, frame, lanes, figure_path, pixel_size_m,
@@ -246,7 +288,7 @@ def _gap_bullets(road_is_osm: bool) -> str:
                  "confident object on a map where it is the least measured one.")
     if road_is_osm:
         return f"""- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
-  the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
+  the imagery's own {INPUT_CHUNK_RES_M:g} m resolution -- see "Bike-lane gap" in `README.md`
 - **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
   (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still
   measured and one it misplaced is not measured in the wrong spot; only the *road* comes from OSM
@@ -262,7 +304,7 @@ def _gap_bullets(road_is_osm: bool) -> str:
   comes from OSM, which shadow cannot obscure, so nothing is withheld as unmeasurable"""
 
     return f"""- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
-  the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
+  the prefiltered output above), at the imagery's own {INPUT_CHUNK_RES_M:g} m resolution -- see "Bike-lane gap" in
   `README.md`
 - **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask in step 8 is
   quantised to 4.4 m blocks. A cross-section cut from the pixels locates each edge subpixel (measured
@@ -304,7 +346,7 @@ Every stage below runs on the same fixed example region:
 
 ## 1. Raw input imagery
 
-- **Content:** unmodified source tile crop (`data/input/idop_kacheln/{TILE_STEM}.jp2`)
+- **Content:** unmodified source tile crop (`{RAW_TILE_REL}`)
 
 ![raw input](figures/01_raw.png)
 

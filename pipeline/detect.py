@@ -44,15 +44,15 @@ from pipeline.config import (
     DETECTION_OUTPUT_PATH,
     GAP_MAP_PATH,
     GAP_OUTPUT_PATH,
-    INPUT_TILES_DIR,
     OUTPUT_DIR,
     PIPELINE_TILE_STEMS,
     TILE_CRS,
     USE_CACHED_BIKELANE_MASK,
     USE_OSM_ROAD_FALLBACK,
+    raw_tile_path,
 )
 from scripts.detection.bikelane_centerlines import (
-    detect_lane_centerlines,
+    detect_lanes,
     lane_centerlines_from_mask,
     load_lane_mask,
 )
@@ -77,7 +77,7 @@ def _scan_progress(done: int, total: int, started: float) -> None:
 
 def run_tile(stem: str, window: Window | None):
     """Detect lanes in one tile, then measure each one's gap to the road."""
-    raw_tile = INPUT_TILES_DIR / f"{stem}.jp2"
+    raw_tile = raw_tile_path(stem)
     prefiltered_tile = OUTPUT_DIR / f"{stem}_bikelanes.tif"
 
     bands, transform, bounds, pixel_size_m = load_chunk_for(raw_tile, window)
@@ -92,10 +92,9 @@ def run_tile(stem: str, window: Window | None):
         lane_mask = load_lane_mask(cached_mask, window)
         print(f"        {len(lanes)} lane(s) in {time.time() - started:.1f} s")
     else:
-        lane_mask = None
         print("  [1/2] tracing bike lanes from the prefiltered imagery "
               "(no cached mask; this runs a coarse CNN scan)...", flush=True)
-        lanes = detect_lane_centerlines(
+        lanes, lane_mask = detect_lanes(
             prefiltered_tile, window,
             progress=lambda d, t: _scan_progress(d, t, started),
         )

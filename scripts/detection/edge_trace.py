@@ -40,26 +40,42 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import binary_dilation, distance_transform_edt, label, uniform_filter1d
+from scipy.ndimage import binary_closing, binary_dilation, distance_transform_edt, label, uniform_filter1d
 from skimage.color import rgb2hsv
 from skimage.draw import line as draw_line
 from skimage.morphology import closing, disk, remove_small_objects
 
+from pipeline.config import (
+    COARSE_BRIDGE_M,
+    COARSE_BRIDGE_ORIENTATIONS,
+    INPUT_CHUNK_RES_M,
+    scaled_area_px,
+    scaled_px,
+)
 from scripts.detection.base import Detection
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
 
+# Colour thresholds are dimensionless -- a hue is a hue at any resolution --
+# so they are stated outright. Every *_PX constant below is a ground distance
+# in disguise and is stated at the 0.2 m/px it was swept at, then scaled to the
+# chunk's actual resolution (see config.TUNED_AT_M).
 EDGE_HUE_TOLERANCE = 0.15
 
 EDGE_MIN_SATURATION = 0.07
 
-ROI_DILATION_PX = 8
+# A ground distance, so it follows the chunk's resolution like the rest.
+COARSE_BRIDGE_PX = max(0, round(COARSE_BRIDGE_M / INPUT_CHUNK_RES_M))
 
-CLOSING_RADIUS_PX = 2
+ROI_DILATION_PX = scaled_px(8)
 
-MIN_COMPONENT_AREA_PX = 15
+CLOSING_RADIUS_PX = scaled_px(2)
 
-CENTERLINE_BIN_WIDTH_PX = 3
+MIN_COMPONENT_AREA_PX = scaled_area_px(15)
 
+CENTERLINE_BIN_WIDTH_PX = scaled_px(3)
+
+# Bins, not pixels: CENTERLINE_BIN_WIDTH_PX already carries the scale, so a
+# minimum bin count spans the same ground however fine the imagery is.
 MIN_CENTERLINE_BINS = 7
 
 SMOOTHING_WIDTH_MULTIPLE = 3.0
@@ -71,9 +87,9 @@ BRIDGE_ALIGNMENT_COS_MIN = 0.82
 BRIDGE_TANGENT_LOOKBACK_POINTS = 5
 
 
-SHADOW_EXCLUSION_MARGIN_PX = 5
+SHADOW_EXCLUSION_MARGIN_PX = scaled_px(5)
 
-ROAD_MIN_COMPONENT_AREA_PX = 200
+ROAD_MIN_COMPONENT_AREA_PX = scaled_area_px(200)
 
 def _paint_mask(image: np.ndarray, roi: np.ndarray) -> np.ndarray:
     """Pixel-precise "is this bike-lane paint" mask within `roi`, by color alone."""
@@ -198,6 +214,43 @@ def _bridge(segment_a: Segment, segment_b: Segment, shape: tuple[int, int]) -> n
     return None
 
 
+def _line_element(length_px: int, degrees: float) -> np.ndarray:
+    """A one-pixel-wide line of `length_px` at `degrees`, for morphology."""
+    size = length_px | 1
+    element = np.zeros((size, size), dtype=bool)
+    centre = size // 2
+    angle = np.deg2rad(degrees)
+    offsets = np.arange(-centre, centre + 1)
+    rows = np.rint(centre - offsets * np.sin(angle)).astype(int)
+    cols = np.rint(centre + offsets * np.cos(angle)).astype(int)
+    inside = (rows >= 0) & (rows < size) & (cols >= 0) & (cols < size)
+    element[rows[inside], cols[inside]] = True
+    return element
+
+
+def connect_coarse(mask: np.ndarray, bridge_px: int = COARSE_BRIDGE_PX) -> np.ndarray:
+    """Close gaps along linear structures in the coarse mask.
+
+    The coarse scan drops out in bands along a continuous lane, because its
+    window grid is anchored to the image while the lane runs at an angle to
+    it: the window's paint fill oscillates, and windows that straddle the
+    lane's edge are half asphalt and score as not-lane. The detector has
+    already confirmed lane either side of such a gap, so bridging it adds no
+    claim the scan did not make -- see COARSE_BRIDGE_M.
+
+    Closed with a *line* element rather than a disk, swept over orientations
+    and unioned: a line joins detections lying along it and leaves isolated
+    blobs their own size, where a disk would grow every detection sideways and
+    merge a lane into whatever borders it.
+    """
+    if bridge_px < 3 or not mask.any():
+        return mask
+    out = np.zeros_like(mask)
+    for degrees in np.linspace(0, 180, COARSE_BRIDGE_ORIENTATIONS, endpoint=False):
+        out |= binary_closing(mask, structure=_line_element(bridge_px, degrees))
+    return out
+
+
 def _traced_components(
     image: np.ndarray,
     coarse: list[Detection],
@@ -211,7 +264,9 @@ def _traced_components(
     Only the bike-lane detector uses this now; `surface_mask` is kept as a
     parameter because it is the one part that knows what is being looked for.
     """
-    roi = binary_dilation(coarse[0].mask, iterations=ROI_DILATION_PX)
+    # Bridge the scan-grid dropouts before growing the region of interest, so
+    # a lane broken into bands by window alignment is traced as one run.
+    roi = binary_dilation(connect_coarse(coarse[0].mask), iterations=ROI_DILATION_PX)
     mask = surface_mask(image, roi)
     if not mask.any():
         return []

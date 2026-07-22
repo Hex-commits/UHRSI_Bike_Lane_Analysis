@@ -81,20 +81,32 @@ def lane_centerlines_from_mask(
     return gpd.GeoDataFrame({"geometry": lines}, geometry="geometry", crs=TILE_CRS)
 
 
-def detect_lane_centerlines(
+def detect_lanes(
     tile_path,
     window: Window | None = None,
     coarse_detector=None,
     progress=None,
-) -> gpd.GeoDataFrame:
-    """Bike-lane centrelines detected in a prefiltered `tile_path`.
+) -> tuple[gpd.GeoDataFrame, np.ndarray]:
+    """Bike-lane centrelines *and* their mask, detected in a prefiltered tile.
 
-    Returns a GeoDataFrame of LineStrings in TILE_CRS, one per detected lane
-    (components too short to reduce to a centreline are dropped). `window`
-    limits detection to that extent; `coarse_detector` is accepted so a caller
-    can reuse a loaded model. The coarse scan is run here rather than inside
-    `BikeLaneEdgeDetector` so `progress` can report it -- over a whole tile it
-    is ~20 min, and a silent wait that long is indistinguishable from a hang.
+    Returns `(centrelines, mask)`: LineStrings in TILE_CRS, one per detected
+    lane (components too short to reduce to a centreline are dropped), plus the
+    union of the detections' own masks on the tile grid -- the same thing
+    `load_lane_mask` reads back from a cached detection raster.
+
+    Both, not just the centrelines, because the gap measurement needs both and
+    they must describe the same lanes. Under USE_OSM_ROAD_FALLBACK the lane's
+    near edge is read from the mask (`CrossSection.lane_edge_m`), since where
+    lane and road are the same asphalt the spectral segmentation merges them
+    into one run. Returning centrelines alone left every caller on this path
+    passing `lane_mask=None`, and every cross-section was then skipped as
+    "unresolved" -- a tile with no cached mask silently measured zero gaps.
+
+    `window` limits detection to that extent; `coarse_detector` is accepted so
+    a caller can reuse a loaded model. The coarse scan is run here rather than
+    inside `BikeLaneEdgeDetector` so `progress` can report it -- over a whole
+    tile it is ~20 min, and a silent wait that long is indistinguishable from
+    a hang.
     """
     with rasterio.open(tile_path) as src:
         image = np.transpose(src.read([1, 2, 3], window=window), (1, 2, 0))
@@ -104,9 +116,24 @@ def detect_lane_centerlines(
     coarse = coarse_detector.predict(image, progress=progress)
     detector = BikeLaneEdgeDetector(coarse_detector=coarse_detector)
     lines = []
+    mask = np.zeros(image.shape[:2], dtype=bool)
     for detection in detector.predict(image, coarse=coarse):
         points = _binned_centerline(detection.mask)
         if points is None:
             continue
+        # Only lanes that survived to a centreline go into the mask, so the
+        # two products describe the same set of lanes.
+        mask |= detection.mask
         lines.append(LineString([transform * (col, row) for row, col in points]))
-    return gpd.GeoDataFrame({"geometry": lines}, geometry="geometry", crs=TILE_CRS)
+    return gpd.GeoDataFrame({"geometry": lines}, geometry="geometry", crs=TILE_CRS), mask
+
+
+def detect_lane_centerlines(
+    tile_path,
+    window: Window | None = None,
+    coarse_detector=None,
+    progress=None,
+) -> gpd.GeoDataFrame:
+    """`detect_lanes`, centrelines only -- for callers with no use for the mask."""
+    lanes, _mask = detect_lanes(tile_path, window, coarse_detector, progress)
+    return lanes

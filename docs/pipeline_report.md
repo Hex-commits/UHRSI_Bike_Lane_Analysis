@@ -7,19 +7,19 @@ pipeline change with:*
 uv run python -m scripts.diagnostics.generate_pipeline_report
 ```
 
-*Generated 2026-07-21 20:13 UTC from commit `7b2eea8`.*
+*Generated 2026-07-22 16:30 UTC from commit `904c90a`.*
 
 Every stage below runs on the same fixed example region:
 
-- **Tile:** `idop20rgbi_32_404_5757_1_nw_2025`
-- **Pixel window:** x=4300, y=1330, w=750, h=180
+- **Tile:** `dop10rgbi_32_406_5758_1_nw_2026`
+- **Pixel window:** x=5378, y=2079, w=1750, h=1750
 - **Choice of region:** the area used throughout this project's development to validate each stage
 - **Purpose of this document:** a visual trail through the pipeline for reference in writeups; see
   `README.md` for the full technical writeup
 
 ## 1. Raw input imagery
 
-- **Content:** unmodified source tile crop (`data/input/idop_kacheln/idop20rgbi_32_404_5757_1_nw_2025.jp2`)
+- **Content:** unmodified source tile crop (`data/input/dop10rgbi_32_406_5758_1_nw_2026.jp2`)
 
 ![raw input](figures/01_raw.png)
 
@@ -102,12 +102,12 @@ region-of-interest-as-measurement trade the CNN path avoids on purpose; the fall
 coverage, when a detected surface is worse than a sensible per-class guess. The per-class widths in
 `OSM_ROAD_DEFAULT_WIDTH_M` are the one thing to tune for a new area.
 
-**Surface assumed on this frame:** 36,153 px across 1 street buffer(s).
+**Surface assumed on this frame:** 606,551 px across 5 street buffer(s).
 
 ## 9. road-to-bike-lane gap
 
 - **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
-  the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
+  the imagery's own 0.1 m resolution -- see "Bike-lane gap" in `README.md`
 - **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
   (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still
   measured and one it misplaced is not measured in the wrong spot; only the *road* comes from OSM
@@ -124,9 +124,9 @@ coverage, when a detected surface is worse than a sensible per-class guess. The 
 
 ![bikelane gap](figures/10_bikelane_gap.png)
 
-**On this frame:** 54 of 70 cross-sections measured, 16 in
-shadow; median gap 3.47 m, and 0% with no separating strip
-at all (37 abutting, 17 asphalt). That most lanes read 0 m is the real picture of the district: most cycling
+**On this frame:** 88 of 98 cross-sections measured, 10 in
+shadow; median gap 0.05 m, and 48% with no separating strip
+at all (42 contiguous, 36 abutting, 8 asphalt, 1 red paint, 1 bright/marking). That most lanes read 0 m is the real picture of the district: most cycling
 infrastructure here is painted onto or flush with the road. A gap only opens up where a verge,
 buffer or paved strip physically separates the two -- those are the coloured stretches.
 
