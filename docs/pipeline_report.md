@@ -7,7 +7,7 @@ pipeline change with:*
 uv run python -m scripts.diagnostics.generate_pipeline_report
 ```
 
-*Generated 2026-07-21 15:13 UTC from commit `e2455dd`.*
+*Generated 2026-07-21 15:34 UTC from commit `7b2eea8`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -46,8 +46,8 @@ Every stage below runs on the same fixed example region:
 
 ## 4. Red-saturation boost
 
-- **Left:** raw imagery
-- **Right:** result of `scripts/redness.py`'s saturation boost on reddish (bike-lane paint) pixels
+- **Top:** raw imagery
+- **Bottom:** result of `scripts/redness.py`'s saturation boost on reddish (bike-lane paint) pixels
   within the buffer mask
 
 ![red boost before/after](figures/04_red_boost.png)
@@ -64,9 +64,9 @@ Every stage below runs on the same fixed example region:
 - **Detector:** `TextureEmbeddingDetector`, a frozen Swin V2-B backbone with `discriminant_score`
   classification (see the "Texture-embedding detector" section of `README.md`)
 - **Operation:** sliding-window scan of the prefiltered crop
-- **Left:** RGB
+- **Top:** RGB
 - **Middle:** continuous discriminant-score heatmap (red = bikelane-side, blue = negative-side)
-- **Right:** thresholded detection mask at window-block resolution, not yet precise enough for width
+- **Bottom:** thresholded detection mask at window-block resolution, not yet precise enough for width
   measurement
 
 ![cnn scan](figures/06_cnn_scan.png)
@@ -77,10 +77,10 @@ Every stage below runs on the same fixed example region:
 - **Processing steps:** classical color thresholding within the CNN's coarse region, PCA-binned
   centerline extraction, constant-width band reconstruction, and directional bridging across gaps
   (parked cars, shadow)
-- **Left:** RGB
+- **Top:** RGB
 - **Middle:** coarse CNN mask, for reference only; its shape is the scan window's footprint, not the
   lane's
-- **Right:** final pixel-precise, regularized, bridged mask
+- **Bottom:** final pixel-precise, regularized, bridged mask
 
 ![edge trace](figures/07_edge_trace.png)
 
@@ -90,8 +90,8 @@ Every stage below runs on the same fixed example region:
   street is buffered to half a default width for its `highway` class (`OSM_ROAD_DEFAULT_WIDTH_M`,
   `scripts/detection/osm_road_surface.py`) and rasterised as the road surface -- see "OSM-width
   fallback" under "Road detection" in `README.md`.
-- **Left:** RGB
-- **Right:** the assumed road surface (blue), a class-width band centred on each OSM centerline
+- **Top:** RGB
+- **Bottom:** the assumed road surface (blue), a class-width band centred on each OSM centerline
 
 ![road surface](figures/09_road_trace.png)
 
@@ -115,9 +115,11 @@ coverage, when a detected surface is worse than a sensible per-class guess. The 
   highway-class width, at half-width along the cross-section, *not* from pixels. The lane edge and the
   separating strip between are still measured from the imagery, so the gap reads as the distance from
   the *assumed* road edge to the *measured* lane
-- **Colour:** each lane segment coloured by that gap; **0 m** (light blue) means the assumed road
-  reaches the lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM,
-  which shadow cannot obscure, so nothing is withheld as unmeasurable
+- **Reading the figure:** orange is the assumed road surface, green the detected bike lane -- both
+  flat, since they are identities, not magnitudes. The ribbon between them is the gap, and it alone
+  carries the blue scale inset at bottom left; **0 m** (light blue) means the assumed road reaches the
+  lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM, which
+  shadow cannot obscure, so nothing is withheld as unmeasurable
 
 ![bikelane gap](figures/10_bikelane_gap.png)
 

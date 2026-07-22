@@ -275,7 +275,7 @@ def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes, la
 
 
 def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(13, 13),
-               streets=None, lane_mask=None):
+               streets=None, lane_mask=None, bare=False):
     """Draw the two things being compared, and colour the space between them.
 
     The figure has to answer "the gap between *what* and *what*", so the road
@@ -287,10 +287,17 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     An earlier version coloured the *lane* by its gap, which put the number on
     the wrong object: the reader saw a coloured lane and no indication of what
     it was measured against.
+
+    `bare` drops the title, legend and surrounding white margin, and moves the
+    gap scale onto the map as an inset -- the form the pipeline report wants,
+    where the surrounding prose already says what road and lane are and the
+    figure sits in a stack of edge-to-edge image panels. `figsize`'s height is
+    then derived from the imagery so nothing is letterboxed.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as path_effects
     from matplotlib.collections import PolyCollection
     from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap
     from matplotlib.patches import Patch
@@ -311,7 +318,11 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     grey = rgb.mean(axis=2, keepdims=True)
     rgb = np.clip((rgb * 0.35 + grey * 0.65) * 0.62 + 0.10, 0, 1)
 
+    if bare:
+        figsize = (figsize[0], figsize[0] * rgb.shape[0] / rgb.shape[1])
     fig, ax = plt.subplots(figsize=figsize, facecolor=surface)
+    if bare:
+        ax.set_position([0, 0, 1, 1])
     ax.imshow(rgb)
 
     # --- the two things being compared, each one flat colour ---------------
@@ -371,27 +382,44 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
                               edgecolors="face", linewidths=0.4)
         band.set_array(np.array(values))
         ax.add_collection(band)
-        bar = fig.colorbar(band, ax=ax, fraction=0.032, pad=0.02,
-                           spacing="uniform", ticks=breaks)
-        bar.ax.set_yticklabels([f"{b:g}" for b in breaks])
-        bar.set_label("gap between road and bike lane (m)", color=muted, fontsize=10)
-        bar.ax.tick_params(colors=muted, labelsize=9)
-        bar.outline.set_edgecolor("#d8d7d2")
+        if bare:
+            # On the map, not beside it: a bar in the corner, its labels
+            # stroked in dark so they hold up over both imagery and ramp.
+            cax = ax.inset_axes([0.015, 0.17, 0.26, 0.038], zorder=7)
+            bar = fig.colorbar(band, cax=cax, orientation="horizontal",
+                               spacing="uniform", ticks=breaks)
+            bar.ax.set_xticklabels([f"{b:g}" for b in breaks])
+            bar.set_label("gap (m)", color=surface, fontsize=9, labelpad=3)
+            bar.ax.tick_params(colors=surface, labelsize=8, length=2, pad=2)
+            bar.outline.set_edgecolor(surface)
+            stroke = [path_effects.withStroke(linewidth=2.2, foreground="#0b0b0b")]
+            for text in [*bar.ax.get_xticklabels(), bar.ax.xaxis.label]:
+                text.set_path_effects(stroke)
+        else:
+            bar = fig.colorbar(band, ax=ax, fraction=0.032, pad=0.02,
+                               spacing="uniform", ticks=breaks)
+            bar.ax.set_yticklabels([f"{b:g}" for b in breaks])
+            bar.set_label("gap between road and bike lane (m)", color=muted, fontsize=10)
+            bar.ax.tick_params(colors=muted, labelsize=9)
+            bar.outline.set_edgecolor("#d8d7d2")
 
-    legend = ax.legend(handles=[
-        Patch(facecolor=ROAD_COLOR, alpha=0.55, label="road (OSM centreline, assumed class width)"),
-        Patch(facecolor=LANE_COLOR, alpha=0.85, label="bike lane (detected from imagery)"),
-    ], frameon=True, fontsize=9.5, labelcolor=ink, loc="lower left", borderpad=0.7)
-    legend.get_frame().set_facecolor(surface)
-    legend.get_frame().set_edgecolor("#d8d7d2")
-    legend.set_zorder(6)
+    if not bare:
+        legend = ax.legend(handles=[
+            Patch(facecolor=ROAD_COLOR, alpha=0.55, label="road (OSM centreline, assumed class width)"),
+            Patch(facecolor=LANE_COLOR, alpha=0.85, label="bike lane (detected from imagery)"),
+        ], frameon=True, fontsize=9.5, labelcolor=ink, loc="lower left", borderpad=0.7)
+        legend.get_frame().set_facecolor(surface)
+        legend.get_frame().set_edgecolor("#d8d7d2")
+        legend.set_zorder(6)
 
-    span_m = bands.shape[2] * pixel_size_m
-    ax.set_title(f"Road-to-bike-lane gap\n"
-                 f"{len(quads)} measured spans · {span_m:.0f} m across",
-                 color=ink, fontsize=13, loc="left", weight="bold")
+        span_m = bands.shape[2] * pixel_size_m
+        ax.set_title(f"Road-to-bike-lane gap\n"
+                     f"{len(quads)} measured spans · {span_m:.0f} m across",
+                     color=ink, fontsize=13, loc="left", weight="bold")
+
     ax.axis("off")
-    fig.savefig(out_path, dpi=140, facecolor=surface, bbox_inches="tight")
+    fig.savefig(out_path, dpi=140, facecolor=surface,
+                **({"pad_inches": 0} if bare else {"bbox_inches": "tight"}))
     plt.close(fig)
     return out_path
 

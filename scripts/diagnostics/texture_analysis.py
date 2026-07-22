@@ -13,20 +13,21 @@ detector -- not part of the production pipeline. Three things live here:
       uv run python -m scripts.diagnostics.texture_analysis
 
 - `visualize_scan` -- sliding-window detector over one region, saved as a
-  3-panel PNG (RGB | score heatmap | thresholded mask). Slow (~90s for
+  3-panel PNG stacked top to bottom (RGB / score heatmap / thresholded
+  mask). Slow (~90s for
   ~870x580 on MPS), for eyeballing a specific region:
 
       uv run python -m scripts.diagnostics.texture_analysis data/output/foo.tif 80 1990 870 580
 
 - `visualize_edge_trace` -- coarse CNN detector then edge_trace.py's color
-  tracer over one region; 3-panel PNG (RGB | coarse block mask | traced mask)
-  plus width stats from the traced mask (the coarse mask's shape is the scan
-  window's footprint, not the lane's):
+  tracer over one region; 3-panel PNG stacked top to bottom (RGB / coarse
+  block mask / traced mask) plus width stats from the traced mask (the coarse
+  mask's shape is the scan window's footprint, not the lane's):
 
       uv run python -m scripts.diagnostics.texture_analysis edges data/output/foo.tif 80 1990 870 580
 
   `road` mode shows RoadEdgeDetector instead -- now just the thresholded CNN
-  mask, so its right-hand panels are near-identical and no width is printed
+  mask, so its lower two panels are near-identical and no width is printed
   (road width comes from OSM centerlines in `scripts.measurement.detect_roads`):
 
       uv run python -m scripts.diagnostics.texture_analysis road data/output/foo.tif 80 1990 870 580
@@ -101,13 +102,31 @@ def print_report(textures_dir=TEXTURES_DIR) -> None:
               f"classification.")
 
 
+def stack_panels(panels: list[np.ndarray], output_path: Path, gap: int = 10) -> None:
+    """Save `panels` stacked top to bottom in one PNG, `gap` px of white between.
+
+    The report window is wide and short, so panels side by side render each one
+    too small to read; stacking keeps them at full width.
+    """
+    width = max(panel.shape[1] for panel in panels)
+    height = sum(panel.shape[0] for panel in panels) + gap * (len(panels) - 1)
+    combined = Image.new("RGB", (width, height), "white")
+    top = 0
+    for panel in panels:
+        combined.paste(Image.fromarray(panel), (0, top))
+        top += panel.shape[0] + gap
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    combined.save(output_path)
+
+
 def visualize_scan(
     tile_path: Path,
     window: Window,
     output_path: Path,
     detector: TextureEmbeddingDetector | None = None,
 ) -> None:
-    """Scan `window` of `tile_path` and save a 3-panel PNG: RGB | score heatmap | thresholded mask.
+    """Scan `window` of `tile_path` and save a 3-panel PNG, stacked top to bottom:
+    RGB / score heatmap / thresholded mask.
 
     Heatmap uses a diverging colormap centered on the discriminant midpoint
     (red = bikelane-side, blue = negative-side); unscanned/empty pixels are
@@ -131,12 +150,7 @@ def visualize_scan(
     overlay[mask] = overlay[mask] * 0.5 + np.array([0.0, 255.0, 0.0]) * 0.5
     overlay = overlay.astype(np.uint8)
 
-    combined = Image.new("RGB", (image.shape[1] * 3 + 20, image.shape[0]), "white")
-    combined.paste(Image.fromarray(image), (0, 0))
-    combined.paste(Image.fromarray(heatmap), (image.shape[1] + 10, 0))
-    combined.paste(Image.fromarray(overlay), (image.shape[1] * 2 + 20, 0))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    combined.save(output_path)
+    stack_panels([image, heatmap, overlay], output_path)
 
     mean_score = f"{detections[0].score:.4f}" if detections else "n/a"
     print(f"Wrote {output_path}  ({len(detections)} detection(s), mean score {mean_score})")
@@ -149,7 +163,8 @@ def visualize_edge_trace(
     coarse_detector: TextureEmbeddingDetector | None = None,
     surface: str = "bikelane",
 ) -> list[Detection]:
-    """Scan `window` of `tile_path` and save a 3-panel PNG: RGB | coarse CNN mask | traced mask.
+    """Scan `window` of `tile_path` and save a 3-panel PNG, stacked top to bottom:
+    RGB / coarse CNN mask / traced mask.
 
     `surface` is "bikelane" or "road". Also prints width statistics
     (detection/width.py) from the traced mask -- the coarse mask's shape is
@@ -197,12 +212,7 @@ def visualize_edge_trace(
             traced_panel[detection.mask] = traced_panel[detection.mask] * 0.45 + color * 0.55
     traced_panel = np.clip(traced_panel, 0, 255).astype(np.uint8)
 
-    combined = Image.new("RGB", (image.shape[1] * 3 + 20, image.shape[0]), "white")
-    combined.paste(Image.fromarray(image), (0, 0))
-    combined.paste(Image.fromarray(coarse_panel), (image.shape[1] + 10, 0))
-    combined.paste(Image.fromarray(traced_panel), (image.shape[1] * 2 + 20, 0))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    combined.save(output_path)
+    stack_panels([image, coarse_panel, traced_panel], output_path)
 
     print(f"Wrote {output_path}  (coarse px {coarse_mask.sum()}, traced px {traced_mask.sum()})")
     # Segment *width* is deliberately not reported. It was read off the traced
