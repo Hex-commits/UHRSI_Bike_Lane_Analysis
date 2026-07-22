@@ -1,6 +1,6 @@
 # UHRSI Bike Lane Analysis
 
-Filters Münster aerial imagery down to the bike lane / street network, for ML training data prep.
+Filters a chunk of Münster aerial imagery down to the bike lane / street network, for ML training data prep.
 
 - bike lane + street geometry from OpenStreetMap
 - imagery masked to a buffer around that geometry
@@ -25,10 +25,10 @@ uv run python -m pipeline.preprocessing  # 1. the chunk   → data/output/*.tif
 uv run python -m pipeline.detect         # 2. prefiltered → the gap map
 ```
 
-| # | Stage | Command | Reads | Writes | Time |
-|---|---|---|---|---|---|
-| 1 | **Pre-process** | `uv run python -m pipeline.preprocessing` | `INPUT_CHUNK_PATH` | `data/output/<tile>_bikelanes.tif` | minutes |
-| 2 | **Detect + measure the gap** | `uv run python -m pipeline.detect` | raw tiles + cached lane mask + OSM | `data/detections/bikelane_gap.gpkg`, `bikelane_gap_map.png`, `bikelanes.gpkg` | ~1 min/tile |
+| #   | Stage                        | Command                                   | Reads                              | Writes                                                                        | Time        |
+| --- | ---------------------------- | ----------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------- | ----------- |
+| 1   | **Pre-process**              | `uv run python -m pipeline.preprocessing` | `INPUT_CHUNK_PATH`                 | `data/output/<tile>_bikelanes.tif`                                            | minutes     |
+| 2   | **Detect + measure the gap** | `uv run python -m pipeline.detect`        | raw tiles + cached lane mask + OSM | `data/detections/bikelane_gap.gpkg`, `bikelane_gap_map.png`, `bikelanes.gpkg` | ~1 min/tile |
 
 **Stage 2 is the deliverable**: `bikelane_gap_map.png` is the bike lane network coloured by its distance to the road beside it. Bike-lane geometry comes from the imagery (never OSM, so a lane OSM never mapped is still measured); road position comes from OSM. Scope it to a window while iterating — `col row width height` in pixels:
 
@@ -95,13 +95,7 @@ Geoportal](https://www.geoportal.nrw), drop the `.jp2` files under `data/input/`
 (the 2025 IDOP20 tile archive lives in `data/input/idop_kacheln/`), and point
 `INPUT_CHUNK_PATH` at the one to process.
 
-**Resolution is handled, not assumed.** Every `*_PX` constant in `config.py`
-and `detection/edge_trace.py` encodes a ground distance and was swept against
-20 cm/px imagery (`TUNED_AT_M`); each is rescaled to whatever `INPUT_CHUNK_PATH`
-actually is. A 10 cm chunk therefore gets a 44 px texture window rather than 22,
-keeping the same 4.4 m of ground context. Nothing needs adjusting by hand — but
-if you add a new pixel constant, state it at 20 cm and wrap it in `scaled_px`
-(lengths) or `scaled_area_px` (areas).
+Adjust in configs.
 
 ## Pre-processing
 
@@ -112,6 +106,6 @@ uv run python -m pipeline.preprocessing
 - loads tiles, fetches/caches OSM geometry, masks + corrects each tile, writes one GeoTIFF per input tile to `data/output/`
 - safe to re-run: OSM results are cached (`data/osm/osm_features.gpkg`), so it skips the Overpass query unless you delete the cache or pass `force_refresh=True`
 
-## Scripts
+## Configuration
 
 - `pipeline/config.py` — paths, CRS, OSM tag rules, buffer sizes, band labels, toggles
