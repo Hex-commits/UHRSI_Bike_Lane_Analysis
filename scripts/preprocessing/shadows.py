@@ -1,57 +1,19 @@
-"""Detect and normalize shadowed pixels within the road/bike-lane mask.
-
-Detection uses a blue-excess index, (B-R)/(B+R): cast shadows on pavement are
-lit mainly by scattered blue skylight, so they read distinctly bluer than
-sunlit pavement of the same material (ground-truth shadow ~0.28 vs sunlit
-~0.00). An earlier version used Tsai's NSVDI, but on this imagery its
-saturation term was dominated by pavement texture noise and over-triggered.
-Raw detection is still noisy (lane markings, oil stains, compression), so the
-mask is cleaned morphologically: small gaps filled with a disk element
-(rounded boundary, not a staircase), isolated specks below a minimum area
-dropped, since real shadows are coherent blobs.
-
-Correction brightens each shadowed pixel with a per-band offset from *nearby*
-sunlit pixels (a local window), not a tile-wide average -- the mask spans a
-mix of materials. Bands are corrected independently because shadow isn't just
-dimmer, it's bluer, so the R/G/B channels must be rebalanced, not scaled
-together.
-
-A plain "match the local windowed average" correction (two earlier versions)
-systematically undercorrected: a window wide enough to be stable (15 m)
-averages over enough variation that its mean sits below whatever pixel the
-shadow actually touches, so even a "fully corrected" interior stayed darker
-than its neighbor -- no amount of smoothing the *transition* fixes a gap
-between two *regions*. The fix is boundary-matched blending: near the mask
-edge the target is the actual value of the nearest sunlit pixel (via distance
-transform), so the correction meets its real neighbor at the crossing; deeper
-in (past `FEATHER_RADIUS_M`) it blends to the windowed average, since
-single-pixel matching gets noisy far from the boundary. The correction is
-additive, not multiplicative, so a pixel's own texture is preserved not
-amplified.
-
-Two further bugs, only visible on large shadows (wider than `local_radius_m`,
-e.g. a building's cast shadow across a street): pixels whose windowed sunlit
-density fell below `MIN_REFERENCE_DENSITY` were left uncorrected instead of
-falling back to the nearest-sunlit target, leaving a hard dark border where a
-too-wide shadow met corrected pavement; and the "nearest sunlit pixel"
-distance transform ran against *not-shadow* rather than *sunlit*, so near the
-buffer edge the reference could be background/nodata outside the buffer.
-"""
-
 import numpy as np
 from scipy.ndimage import binary_closing, distance_transform_edt, label, uniform_filter
 from skimage.morphology import disk
+from pipeline.config import (
+    BLEED_RADIUS_M,
+    FEATHER_RADIUS_M,
+    MIN_REFERENCE_DENSITY,
+    MIN_SHADOW_AREA_M2,
+    SHADOW_CLOSING_RADIUS_M as CLOSING_RADIUS_M,
+    SHADOW_MAX_GAIN as MAX_GAIN,
+)
 
-MAX_GAIN = 3.0
 
-MIN_REFERENCE_DENSITY = 0.02
 
-CLOSING_RADIUS_M = 0.6
-MIN_SHADOW_AREA_M2 = 1.5
 
-FEATHER_RADIUS_M = 2.0
 
-BLEED_RADIUS_M = 1.0
 
 
 def _otsu_threshold(values: np.ndarray, bins: int = 256) -> float:

@@ -1,20 +1,3 @@
-"""Assume the road surface from OSM instead of detecting it from imagery.
-
-A fallback for scripts/detect_roads.py, enabled by config.USE_OSM_ROAD_FALLBACK,
-for when the CNN road detector underperforms (see README's "Road detection").
-Each OSM street centerline is buffered by half a default width for its highway
-class (config.OSM_ROAD_DEFAULT_WIDTH_M) and rasterized onto the tile grid, in
-place of the CNN surface mask. The result is drop-in: detection/centerline_width.py
-measures width against it exactly as against a detected mask -- so a way's
-reported width is the assumed default for its class, buffered symmetrically
-about the centerline the ray-casting starts from, not anything read from
-pixels. Classes absent from the table use OSM_ROAD_DEFAULT_WIDTH_FALLBACK_M.
-
-This is the region-of-interest-as-measurement trade the main pipeline rejects
-on purpose (README, "Road detection"): the number is the assumption, not a
-measurement. It exists only as a coverage fallback where detection fails.
-"""
-
 import numpy as np
 from rasterio.features import rasterize
 from rasterio.transform import Affine

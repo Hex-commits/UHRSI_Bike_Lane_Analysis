@@ -1,5 +1,3 @@
-"""Discovery and spatial metadata for the raw satellite imagery tiles."""
-
 from pathlib import Path
 
 import rasterio

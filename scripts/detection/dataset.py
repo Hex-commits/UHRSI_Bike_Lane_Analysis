@@ -1,27 +1,3 @@
-"""DEPRECATED -- Convert CVAT-exported YOLO-seg annotations into a chipped training dataset.
-
-Deprecated with `train.py`, its only caller: the YOLO-seg path was retired and
-nothing loads the weights it helps produce. See `train.py`'s docstring for why,
-and note that the pipeline's detector (a frozen backbone, no training) is
-unaffected. Kept so the annotation-to-dataset step stays reproducible.
-
-Annotations are drawn on full tiles, but YOLO trains on smaller images (640px
-chips, matching `ultralytics`' default `imgsz` so chips aren't shrunk further
--- bike lanes are only ~10px wide here). This chips each annotated tile, clips
-each polygon to the chip it falls in (a straddling polygon becomes multiple
-pieces), and writes a standard Ultralytics YOLO-seg dataset:
-
-    data/training/
-      images/train/*.png, images/val/*.png
-      labels/train/*.txt, labels/val/*.txt
-      dataset.yaml
-
-Only chips with at least one instance are kept. Empty chips are NOT treated as
-background negatives: this is "sample" annotation data, not exhaustively
-labeled, so an empty chip might just be an unannotated bike lane. Revisit once
-coverage is closer to exhaustive.
-"""
-
 from dataclasses import dataclass
 from pathlib import Path
 

@@ -1,38 +1,3 @@
-"""The detection pipeline, end to end. Its final product is the bike-lane gap.
-
-    uv run python -m pipeline.detect                       # every PIPELINE_TILE_STEMS tile
-    uv run python -m pipeline.detect 1600 1600 1600 1600   # one window: col row w h
-
-This replaces the YOLO-seg pipeline that used to live in `detect.py` at the
-repository root. That one chipped each tile, ran a fine-tuned YOLO-seg model
-and wrote polygons plus per-lane widths; it was retired because its recall on
-this project's sparse annotations is too low to find the real tracks (it
-misses the validated cycle track outright), and because lane *width* read off
-a detected mask's own shape was never a number worth reporting. Lanes now come
-from the cached edge-mask detection instead, and the question this answers is
-the project's actual question:
-
-    how far is each bike lane from the road beside it, in metres?
-
-Two stages, and the split between their data sources is deliberate:
-
-1. **Bike lanes, from the imagery.** `detection/bikelane_centerlines.py`
-   traces lanes on the *prefiltered* tile, where `redness.py` has boosted the
-   paint. Lane geometry must never come from OSM: a lane OSM has not mapped,
-   or has placed wrongly, would otherwise be invisible or measured against
-   the wrong line. This is the expensive stage -- a coarse CNN scan over a
-   whole tile is ~20 min; pass a window to iterate in seconds.
-
-2. **The gap, from raw pixels.** `measure_bikelane_gap.py` cuts a
-   cross-section from each OSM road centerline out through the detected lane
-   and reads both edges subpixel off the *raw* tile. OSM supplies only where
-   the road is -- with `USE_OSM_ROAD_FALLBACK` it also supplies the road's
-   assumed width, which is an assumption rather than a measurement (see
-   detection/osm_road_surface.py).
-
-Everything tunable lives in `config.py` under "Bike-lane gap".
-"""
-
 import sys
 import time
 
@@ -83,7 +48,6 @@ def run_tile(stem: str, window: Window | None):
     bands, transform, bounds, pixel_size_m = load_chunk_for(raw_tile, window)
     print(f"{stem}: {bands.shape[2]}x{bands.shape[1]} px at {pixel_size_m} m/px")
 
-    # 1. bike lanes, from the imagery
     started = time.time()
     cached_mask = BIKELANE_MASK_PATHS.get(stem)
     if USE_CACHED_BIKELANE_MASK and cached_mask and cached_mask.exists():
@@ -103,7 +67,6 @@ def run_tile(stem: str, window: Window | None):
         print("        no lanes detected; nothing to measure")
         return None, lanes
 
-    # 2. the gap, from raw pixels, against OSM road centerlines
     print("  [2/2] measuring the gap to the road...", flush=True)
     osm = fetch_osm_features(bounds)
     streets = osm[osm.category == "street"].clip(box(*bounds))
@@ -161,8 +124,6 @@ def main() -> None:
 
     gaps = gpd.GeoDataFrame(gpd.pd.concat(frames, ignore_index=True), crs=TILE_CRS)
 
-    # The detected lanes are a product in their own right, and give
-    # DETECTION_OUTPUT_PATH the meaning it was declared with.
     lane_frame = gpd.GeoDataFrame(gpd.pd.concat(all_lanes, ignore_index=True), crs=TILE_CRS)
     if not lane_frame.empty:
         lane_path = DETECTION_OUTPUT_PATH.with_name(
@@ -181,11 +142,6 @@ def main() -> None:
                           pixel_size_m, streets=streets, lane_mask=lane_mask)
     print(f"Wrote {map_path}")
 
-    # Reported over every cross-section, matching the map. The `reliable`
-    # and `shadow_fraction` columns are still written to the GeoPackage for
-    # anyone who wants to filter on them, but a shadowed stretch is no longer
-    # withheld: with USE_OSM_ROAD_FALLBACK the road edge comes from the OSM
-    # class width, which shadow cannot obscure.
     if len(gaps):
         values = gaps.gap_m.to_numpy()
         print("\nFINAL RESULT -- road-to-bike-lane gap")

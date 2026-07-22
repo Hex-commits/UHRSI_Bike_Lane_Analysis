@@ -1,16 +1,3 @@
-"""Generate a visual, stage-by-stage walkthrough of the pipeline for writeups.
-
-Runs one fixed example region (`REPORT_BOUNDS`, in CRS metres) of the
-configured chunk through every stage -- raw imagery, OSM masking, shadow
-detection, red boost, prefiltered output, CNN texture scan, edge
-tracing/regularization/bridging -- and writes docs/pipeline_report.md with one
-figure per stage, ending with the road-to-bike-lane gap. Scoped to a small region
-rather than a full tile so it stays quick (a full-tile CNN scan takes 20+
-minutes), making "regenerate after every change" practical:
-
-    uv run python -m scripts.diagnostics.generate_pipeline_report
-"""
-
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,33 +32,18 @@ from scripts.detection.texture_detector import bike_lane_detector, road_detector
 from scripts.measurement.measure_bikelane_gap import load_chunk, measure_gaps, prepare_shadow, render_map
 from scripts.preprocessing.osm_features import fetch_osm_features
 from scripts.diagnostics.texture_analysis import stack_panels, visualize_edge_trace, visualize_scan
+from pipeline.config import (
+    REPORT_BOUNDS,
+    REPORT_FIGURES_DIR as FIGURES_DIR,
+    REPORT_PATH,
+    REPORT_TILE_STEM as TILE_STEM,
+)
 
-# The report runs on whatever INPUT_CHUNK_PATH is, never a tile pinned here.
-# The *_PX detection constants are scaled to that chunk's resolution (see
-# config.TUNED_AT_M), so figures generated from any other imagery would come
-# out of a texture window covering the wrong ground extent -- and nothing
-# about them would look wrong.
-TILE_STEM = PIPELINE_TILE_STEMS[0]
 RAW_TILE_PATH = raw_tile_path(TILE_STEM)
 OUTPUT_TILE_PATH = OUTPUT_DIR / f"{TILE_STEM}_bikelanes.tif"
 
-# Quoted in the report body. Derived, not written out: the chunk need not live
-# in the tile archive, and the report claimed `data/input/idop_kacheln/...` for
-# a file that sits directly in `data/input/`.
 RAW_TILE_REL = RAW_TILE_PATH.relative_to(PROJECT_ROOT)
 
-# The worked example's extent, as (left, bottom, right, top) in TILE_CRS
-# metres. Geographic rather than a pixel Window on purpose: the same pixel
-# offsets frame different ground at every resolution, and on a different tile
-# they frame unrelated ground entirely. The previous
-# Window(4300, 1330, 750, 180) picked out a cycle track on the 20 cm tile
-# 404_5757 and meant nothing anywhere else.
-REPORT_BOUNDS = (
-    406537.8249676815,
-    5758617.074135774,
-    406712.8249676815,
-    5758792.074135774,
-)
 
 
 def _report_window() -> Window:
@@ -83,8 +55,6 @@ def _report_window() -> Window:
 
 WINDOW = _report_window()
 
-FIGURES_DIR = PROJECT_ROOT / "docs" / "figures"
-REPORT_PATH = PROJECT_ROOT / "docs" / "pipeline_report.md"
 
 
 def _overlay(image: np.ndarray, mask: np.ndarray, color: tuple[float, float, float], alpha: float = 0.55) -> np.ndarray:
@@ -194,9 +164,6 @@ def _bikelane_gap(figure_path: Path) -> dict:
     corrected, shadow, near_edge = prepare_shadow(bands, transform, bounds, pixel_size_m, streets)
     records, _sections, _skipped = measure_gaps(corrected, transform, bounds, shadow,
                                                 near_edge, streets, lanes, lane_mask)
-    # An empty result is a finding about the region, not a crash: constructing
-    # a GeoDataFrame from [] raises for want of a geometry column, which turned
-    # "no gaps measurable here" into a failed report run.
     if not records:
         print(f"  no gaps measured in the report window ({len(lanes)} lane(s), "
               f"{len(streets)} street(s)); skipping figure {figure_path.name}")

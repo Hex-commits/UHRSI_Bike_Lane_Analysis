@@ -1,5 +1,3 @@
-"""Fetch bike lane and street geometry from OpenStreetMap for an area of interest."""
-
 from pathlib import Path
 
 import geopandas as gpd

@@ -1,30 +1,3 @@
-"""Run the road detector over a whole tile (or one window of it) and write results.
-
-    uv run python -m scripts.measurement.detect_roads data/output/foo.tif             # whole tile
-    uv run python -m scripts.measurement.detect_roads data/output/foo.tif 22          # whole tile, coarser scan
-    uv run python -m scripts.measurement.detect_roads data/output/foo.tif 11 0 0 1500 1500   # one window
-
-Writes a GeoPackage of per-OSM-way road widths, a width-colored map over the
-imagery, and the traced surface as both an overlay and a mask. Width is
-measured along OSM centerlines, not the traced mask's shape (see
-detection/centerline_width.py for why nothing mask-derived survives a junction).
-
-Unlike detect.py's chip loop, the scan, trace and measurement all run against
-the full extent in one pass: a 640 px chip is 128 m, so chip boundaries would
-cut the surface and the OSM ways crossing them, and a clipped way would be
-measured several times from too few samples each. Only the sliding scan window
-is chunked, by batch, inside the detector. The cost is time not memory -- the
-scan dominates (a 5000x5000 tile took 23 min at the default stride, ~1/stride^2)
-so the surface mask is cached alongside the results, letting a re-render or
-re-measure skip the scan.
-
-With config.USE_OSM_ROAD_FALLBACK set, the CNN scan is skipped entirely and the
-road surface is instead assumed from OSM: each street is buffered to a default
-width for its highway class (detection/osm_road_surface.py). Everything
-downstream is identical, but a way's reported width is then the assumed default,
-not a measurement -- a coverage fallback for when detection underperforms.
-"""
-
 import sys
 import time
 from pathlib import Path
@@ -44,19 +17,21 @@ from scripts.measurement.osm_road_surface import osm_road_surface
 from scripts.detection.texture_detector import road_detector
 from scripts.preprocessing.osm_features import fetch_osm_features
 from scripts.diagnostics.texture_analysis import SEGMENT_COLORS
+from pipeline.config import (
+    CENTERLINE_WIDTH_PX,
+    MIN_SAMPLES_PER_WAY,
+    PREVIEW_MAX_PX,
+    SHADOW_BAND,
+    WIDTH_COLOR_MAX_M,
+    WIDTH_COLOR_MIN_M,
+)
 
 OUTPUT_DIR = PROJECT_ROOT / "data" / "detections"
 
-SHADOW_BAND = 6
 
-PREVIEW_MAX_PX = 2500
 
-MIN_SAMPLES_PER_WAY = 3
 
-WIDTH_COLOR_MIN_M = 4.0
-WIDTH_COLOR_MAX_M = 20.0
 
-CENTERLINE_WIDTH_PX = 5
 
 
 def _progress(done: int, total: int, started: float) -> None:

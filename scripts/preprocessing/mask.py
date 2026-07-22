@@ -1,5 +1,3 @@
-"""Build buffered raster masks from OSM vector geometries, grouped by category."""
-
 import geopandas as gpd
 import numpy as np
 from rasterio.features import rasterize

@@ -1,31 +1,3 @@
-"""Identify bike-lane texture via a frozen, pretrained-on-aerial-imagery CNN's embeddings.
-
-Uses TorchGeo's Swin V2-B backbone pretrained on NAIP aerial RGB
-(SatlasPretrain) as a frozen feature extractor -- no training at all. NAIP is
-the closest domain match among TorchGeo's options: both are high-res top-down
-RGB aerial capture, unlike Sentinel-2 (10 m/px) or Landsat (30 m/px) which
-would see a whole bike lane as a sub-pixel smudge.
-
-Plain nearest-neighbor cosine similarity to individual references (an earlier
-version) didn't work: any two pavement-like patches stayed similar (0.75-0.95)
-almost regardless of class -- two different bike-lane crops came out *less*
-similar (0.85) than one was to a road crop (0.87). The embedding's dominant
-variance is "generic top-down pavement texture", shared by everything, and
-the signal we want (reddish paint vs gray asphalt) is a small component
-swamped by raw similarity. The fix: `discriminant_score` projects a candidate
-onto the *difference* between the mean bikelane and mean negative embedding,
-isolating the component that separates the classes. Still zero training --
-arithmetic on frozen embeddings, not gradient descent.
-
-Reference embeddings are extracted once from data/input/textures/<label>/ (one
-per file, grouped by subfolder). Folders are named per *surface* ("bikelane",
-"road", "sidewalk", "rooftop") not "positive"/"negative", because which counts
-as positive depends on the detector: road is a negative for the bike-lane
-detector and the positive for the road detector. Each detector names its own
-positive and negative labels (config.py's BIKE_LANE_TEXTURE_LABELS /
-ROAD_TEXTURE_LABELS).
-"""
-
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -33,8 +5,10 @@ import numpy as np
 import torch
 from PIL import Image
 from torchgeo.models import Swin_V2_B_Weights, swin_v2_b
+from pipeline.config import (
+    INPUT_SIZE_PX,
+)
 
-INPUT_SIZE_PX = 256
 
 _model: torch.nn.Module | None = None
 _device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")

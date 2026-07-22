@@ -1,20 +1,3 @@
-"""Preview: connecting the coarse CNN detections before edge tracing.
-
-The coarse scan fires reliably on lane *interior* (99% of windows centred on
-one, measured over a 319 m run) and correctly refuses windows that straddle a
-lane edge, which are half asphalt. Because the scan grid is anchored to the
-image and a lane drifts across it, the paint fill of the nearest window
-oscillates along the lane -- so detections switch on and off in bands even
-where the lane is continuous and the detector has confirmed it either side.
-
-Those gaps are an alignment artifact, not evidence of absence, which is what
-makes closing them defensible. This renders the mask before and after a
-directional closing at two bridging lengths so the trade can be seen rather
-than argued about:
-
-    uv run python -m scripts.diagnostics.preview_connection
-"""
-
 import numpy as np
 import rasterio
 from PIL import Image, ImageDraw
@@ -25,11 +8,11 @@ from scripts.detection.edge_trace import connect_coarse
 from scripts.detection.texture_detector import bike_lane_detector
 from scripts.diagnostics.generate_pipeline_report import OUTPUT_TILE_PATH, WINDOW
 from scripts.measurement.measure_bikelane_gap import LANE_COLOR
+from pipeline.config import (
+    CONNECTION_PREVIEW_BRIDGE_M as BRIDGE_M,
+    CONNECTION_PREVIEW_PATH as OUT_PATH,
+)
 
-OUT_PATH = PROJECT_ROOT / "connection_preview.png"
-
-# Bridging lengths to compare, in metres of ground.
-BRIDGE_M = (2.0, COARSE_BRIDGE_M)
 
 
 

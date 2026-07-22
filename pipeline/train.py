@@ -1,31 +1,3 @@
-"""DEPRECATED -- fine-tunes a YOLO-seg model nothing in the pipeline loads.
-
-Kept for the record, not for use. The inference half of this path was retired:
-`detect.py` (the root YOLO pipeline) and
-`scripts/detection/yolo_seg_detector.py` are both gone, so the weights this
-writes to YOLO_SEG_TRAINED_WEIGHTS_PATH are read by no code. Running it will
-train a model and change nothing downstream.
-
-**This is not the CNN the pipeline uses, and never was.** Detection runs on
-the frozen Swin V2-B backbone in `scripts/texture_embedding.py` -- pretrained
-on NAIP aerial imagery and used as a feature extractor with no training at
-all, classifying by arithmetic on frozen embeddings against the reference
-crops in `data/input/textures/`. Nothing there needs this script, and
-deleting this file would not affect it.
-
-Why the YOLO path was retired: recall on this project's sparse "sample"
-annotations is too low to find the real tracks -- it misses the validated
-cycle track outright -- so bike-lane geometry now comes from the cached edge
-mask instead (see `scripts/detect.py`).
-
-Retained deliberately, because it is the only record of how the CVAT
-annotations in ANNOTATIONS_DIR become a trainable dataset, and that negative
-result is worth being able to reproduce. The annotations themselves, and
-`data/training/`, are untouched by the retirement.
-
-    uv run python train.py   # still works; produces weights nothing reads
-"""
-
 from ultralytics import YOLO
 
 from pipeline.config import (

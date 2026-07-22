@@ -1,5 +1,3 @@
-"""Print raster dimensions and band metadata to the terminal."""
-
 import sys
 from pathlib import Path
 

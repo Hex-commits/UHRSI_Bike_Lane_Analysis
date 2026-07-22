@@ -1,30 +1,15 @@
-"""Boost saturation of reddish pixels, so painted bike-lane paint stands out more.
-
-Works in HSV: pixels close to red hue *and* already above a minimum saturation
-get their saturation multiplied up (clamped to 1.0); everything else (asphalt,
-vegetation, low-saturation noise) is left alone. Deliberately narrower than a
-generic contrast stretch (tried and reverted) -- it only touches pixels that
-already read as red, rather than stretching the whole tile's dynamic range.
-Hue tolerance and saturation floor are calibrated against this repo's one
-hand-annotated instance (paint at hue ~0.025-0.046, saturation ~0.11-0.30).
-"""
-
 import numpy as np
 from skimage.color import hsv2rgb, rgb2hsv
+from pipeline.config import (
+    MIN_SATURATION_FOR_BOOST,
+    REDNESS_ROWS_PER_BLOCK as ROWS_PER_BLOCK,
+    RED_HUE_TOLERANCE,
+    SATURATION_BOOST,
+)
 
-RED_HUE_TOLERANCE = 0.08
 
-MIN_SATURATION_FOR_BOOST = 0.05
 
-SATURATION_BOOST = 1.8
 
-# Rows converted per pass. The boost is purely per-pixel -- no neighbourhood,
-# no tile-wide statistic -- so a row block gives bit-identical output to
-# converting the whole tile at once, and bounds peak memory to something that
-# does not depend on the tile's size. It has to: rgb2hsv promotes to float64,
-# so a 10000x10000 chunk is 2.4 GB per intermediate and this function holds
-# several at once, which OOM-killed a 16 GB machine outright.
-ROWS_PER_BLOCK = 512
 
 
 def boost_red_saturation(rgb: np.ndarray, road_mask: np.ndarray) -> np.ndarray:

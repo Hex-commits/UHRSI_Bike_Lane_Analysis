@@ -1,38 +1,3 @@
-"""Diagnostic tools for the texture-embedding detector (see texture_embedding.py, detection/texture_detector.py).
-
-Standalone sanity checks, run by hand while tuning the reference set or
-detector -- not part of the production pipeline. Three things live here:
-
-- `print_report` -- pairwise cosine similarity between every reference
-  embedding, flagging same-class vs different-class overlap. Run when
-  reference images under TEXTURES_DIR change; this is the check that caught
-  the reference set's original problem (bikelane vs road came out *more*
-  similar (0.87) than bikelane vs bikelane (0.85), the overlap
-  `discriminant_score` routes around):
-
-      uv run python -m scripts.diagnostics.texture_analysis
-
-- `visualize_scan` -- sliding-window detector over one region, saved as a
-  3-panel PNG stacked top to bottom (RGB / score heatmap / thresholded
-  mask). Slow (~90s for
-  ~870x580 on MPS), for eyeballing a specific region:
-
-      uv run python -m scripts.diagnostics.texture_analysis data/output/foo.tif 80 1990 870 580
-
-- `visualize_edge_trace` -- coarse CNN detector then edge_trace.py's color
-  tracer over one region; 3-panel PNG stacked top to bottom (RGB / coarse
-  block mask / traced mask) plus width stats from the traced mask (the coarse
-  mask's shape is the scan window's footprint, not the lane's):
-
-      uv run python -m scripts.diagnostics.texture_analysis edges data/output/foo.tif 80 1990 870 580
-
-  `road` mode shows RoadEdgeDetector instead -- now just the thresholded CNN
-  mask, so its lower two panels are near-identical and no width is printed
-  (road width comes from OSM centerlines in `scripts.measurement.detect_roads`):
-
-      uv run python -m scripts.diagnostics.texture_analysis road data/output/foo.tif 80 1990 870 580
-"""
-
 import sys
 from pathlib import Path
 
@@ -48,18 +13,11 @@ from scripts.detection.edge_trace import BikeLaneEdgeDetector, RoadEdgeDetector
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
 from scripts.detection.texture_embedding import cosine_similarity, load_references
 from scripts.measurement.measure_bikelane_gap import LANE_COLOR
+from pipeline.config import (
+    SEGMENT_COLORS,
+)
 
 
-# Only the road panel still uses this; bike lanes draw in the gap map's
-# LANE_COLOR so the two figures agree on what a detected lane looks like.
-SEGMENT_COLORS = [
-    (0, 255, 255),
-    (255, 0, 255),
-    (255, 220, 0),
-    (0, 255, 0),
-    (255, 120, 0),
-    (120, 160, 255),
-]
 
 
 def _rgb(hex_color: str) -> tuple[int, int, int]:
@@ -212,10 +170,6 @@ def visualize_edge_trace(
 
     coarse_panel = overlay(coarse_mask, (0.0, 255.0, 0.0))
 
-    # One flat colour for every traced lane, matching the gap map's lane green
-    # rather than tinting each component separately. Per-component colours read
-    # as if they encoded something; they only ever encoded size rank, and
-    # shuffled from run to run as components changed.
     traced_panel = image.astype(np.float32)
     color = np.array(SEGMENT_COLORS[0] if surface == "road" else _rgb(LANE_COLOR), dtype=np.float32)
     traced_panel[traced_mask] = traced_panel[traced_mask] * 0.45 + color * 0.55
@@ -224,9 +178,6 @@ def visualize_edge_trace(
     stack_panels([image, coarse_panel, traced_panel], output_path)
 
     print(f"Wrote {output_path}  (coarse px {coarse_mask.sum()}, traced px {traced_mask.sum()})")
-    # Segment *width* is deliberately not reported. It was read off the traced
-    # mask's own shape, which is not a boundary this pipeline trusts; the gap
-    # to the carriageway (scripts/detect.py) is the measured quantity.
     print(f"{len(edge_detections)} traced segment(s):")
     for i, detection in enumerate(sorted(edge_detections, key=lambda d: -d.mask.sum())):
         print(f"  segment {i} ({detection.mask.sum()} px)")

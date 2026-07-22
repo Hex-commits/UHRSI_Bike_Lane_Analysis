@@ -3,16 +3,18 @@ from dataclasses import dataclass
 import numpy as np
 from rasterio.transform import Affine
 from shapely.geometry import LineString, MultiLineString
+from pipeline.config import (
+    GAP_TOLERANCE_M,
+    MAX_HALF_WIDTH_M,
+    RAY_STEP_PX,
+    WIDTH_SAMPLE_INTERVAL_M as SAMPLE_INTERVAL_M,
+    WIDTH_TANGENT_HALF_SPAN_M as TANGENT_HALF_SPAN_M,
+)
 
-SAMPLE_INTERVAL_M = 5.0
 
-MAX_HALF_WIDTH_M = 15.0
 
-GAP_TOLERANCE_M = 1.5
 
-RAY_STEP_PX = 0.5
 
-TANGENT_HALF_SPAN_M = 2.5
 
 
 @dataclass

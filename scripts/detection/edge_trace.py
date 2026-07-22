@@ -1,41 +1,3 @@
-"""Precise bike-lane masks: CNN coarse localization, then classical color edge tracing.
-
-Two detectors live here. `BikeLaneEdgeDetector` is the full pipeline: coarse
-CNN region, pixel-precise color threshold inside it, per-component shape
-regularization, directional bridging. `RoadEdgeDetector` is now only the
-coarse CNN mask -- its color test was removed after being measured (it
-discarded two thirds of its region of interest into 138 fragments, and every
-cleanup step after moved the boundary a width gets measured from). The
-asymmetry is deliberate: bike-lane paint has a strong color cue so a color
-test localizes it, road surface does not. Road width is measured separately
-from OSM centerlines (detection/centerline_width.py).
-
-The CNN mask is only a region-of-interest: it is stamped in TEXTURE_WINDOW_PX
-blocks (~4.4m at 0.2m/px), far wider than a real ~2m lane, so a width read
-directly off it would measure the window grid. Inside the ROI the lane's true
-edges are found by color threshold -- bike-lane paint is saturated red, and
-that signal is precise to the pixel.
-
-That raw color mask still isn't the lane's shape: it inherits local dropouts
-and bulges, so `_regularize_band` rebuilds each connected component as a
-constant-width band around a smoothed centerline (`_binned_centerline`: PCA
-for the dominant axis, bin pixels along it, each bin's average position is a
-centerline point, the median distance-to-edge is the radius). Binning is used
-rather than skeletonization, which on this porous ~72%-recall mask produced a
-branchy structure no spur-pruning could reduce to one clean line.
-
-Regularizing per component can leave a lane split where the color signal
-dropped out entirely (a parked car, deep shadow), so
-`BikeLaneEdgeDetector.predict` bridges components whose endpoints are close
-*and* aimed at each other (BRIDGE_* below); the direction check is what makes
-generous distance safe.
-
-Hue/saturation thresholds are NOT reused from redness.py -- its loose
-enhancement thresholds recalled only ~55% of true path pixels here. The
-values below were swept for ~72% recall against a real cycle-track crop while
-keeping false positives against neighboring sidewalk low (~0.8%).
-"""
-
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -54,42 +16,37 @@ from pipeline.config import (
 )
 from scripts.detection.base import Detection
 from scripts.detection.texture_detector import TextureEmbeddingDetector, bike_lane_detector, road_detector
-
-# Colour thresholds are dimensionless -- a hue is a hue at any resolution --
-# so they are stated outright. Every *_PX constant below is a ground distance
-# in disguise and is stated at the 0.2 m/px it was swept at, then scaled to the
-# chunk's actual resolution (see config.TUNED_AT_M).
-EDGE_HUE_TOLERANCE = 0.15
-
-EDGE_MIN_SATURATION = 0.07
-
-# A ground distance, so it follows the chunk's resolution like the rest.
-COARSE_BRIDGE_PX = max(0, round(COARSE_BRIDGE_M / INPUT_CHUNK_RES_M))
-
-ROI_DILATION_PX = scaled_px(8)
-
-CLOSING_RADIUS_PX = scaled_px(2)
-
-MIN_COMPONENT_AREA_PX = scaled_area_px(15)
-
-CENTERLINE_BIN_WIDTH_PX = scaled_px(3)
-
-# Bins, not pixels: CENTERLINE_BIN_WIDTH_PX already carries the scale, so a
-# minimum bin count spans the same ground however fine the imagery is.
-MIN_CENTERLINE_BINS = 7
-
-SMOOTHING_WIDTH_MULTIPLE = 3.0
-
-BRIDGE_MAX_GAP_RADIUS_MULTIPLE = 4.0
-
-BRIDGE_ALIGNMENT_COS_MIN = 0.82
-
-BRIDGE_TANGENT_LOOKBACK_POINTS = 5
+from pipeline.config import (
+    BRIDGE_ALIGNMENT_COS_MIN,
+    BRIDGE_MAX_GAP_RADIUS_MULTIPLE,
+    BRIDGE_TANGENT_LOOKBACK_POINTS,
+    CENTERLINE_BIN_WIDTH_PX,
+    CLOSING_RADIUS_PX,
+    COARSE_BRIDGE_PX,
+    EDGE_HUE_TOLERANCE,
+    EDGE_MIN_SATURATION,
+    MIN_CENTERLINE_BINS,
+    MIN_COMPONENT_AREA_PX,
+    ROAD_MIN_COMPONENT_AREA_PX,
+    ROI_DILATION_PX,
+    SHADOW_EXCLUSION_MARGIN_PX,
+    SMOOTHING_WIDTH_MULTIPLE,
+)
 
 
-SHADOW_EXCLUSION_MARGIN_PX = scaled_px(5)
 
-ROAD_MIN_COMPONENT_AREA_PX = scaled_area_px(200)
+
+
+
+
+
+
+
+
+
+
+
+
 
 def _paint_mask(image: np.ndarray, roi: np.ndarray) -> np.ndarray:
     """Pixel-precise "is this bike-lane paint" mask within `roi`, by color alone."""
@@ -264,8 +221,6 @@ def _traced_components(
     Only the bike-lane detector uses this now; `surface_mask` is kept as a
     parameter because it is the one part that knows what is being looked for.
     """
-    # Bridge the scan-grid dropouts before growing the region of interest, so
-    # a lane broken into bands by window alignment is traced as one run.
     roi = binary_dilation(connect_coarse(coarse[0].mask), iterations=ROI_DILATION_PX)
     mask = surface_mask(image, roi)
     if not mask.any():

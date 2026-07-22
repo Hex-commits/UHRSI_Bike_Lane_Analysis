@@ -1,13 +1,3 @@
-"""Apply buffered bike lane / street masks to satellite imagery tiles.
-
-Pixels outside either buffer are zeroed out. Shadowed pixels within the
-buffers are handled per `SHADOW_HANDLING`: brightness-normalized
-("correct"), dropped entirely ("cut", same as background), or left alone
-("none"). If APPLY_RED_BOOST is set, reddish pixels (bike-lane paint) get a
-saturation boost. Two extra bands are appended: one classifying each pixel
-as bikelane/street, the other flagging whether it was shadowed.
-"""
-
 from pathlib import Path
 
 import numpy as np

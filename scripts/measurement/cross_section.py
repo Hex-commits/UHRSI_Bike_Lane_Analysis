@@ -3,29 +3,31 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, map_coordinates
 from scipy.signal import find_peaks
+from pipeline.config import (
+    ASPHALT,
+    BRIGHTNESS_MARKING,
+    EDGE_PROMINENCE_SIGMA,
+    ILLUMINATION_RATIO,
+    MARKING_BASELINE_M,
+    MARKING_MAX_WIDTH_M,
+    MARKING_MIN_EXCESS,
+    MARKING_SMOOTH_M,
+    MIN_RUN_M,
+    NDVI_VEGETATION,
+    REDNESS_PAINT,
+    SAMPLE_STEP_M,
+    SHADOW_RUN_FRACTION,
+    SHADOW_UNKNOWN,
+    SMOOTH_SIGMA_M,
+)
 
-SAMPLE_STEP_M = 0.05
-SMOOTH_SIGMA_M = 0.15
 
-MIN_RUN_M = 0.0
 
-EDGE_PROMINENCE_SIGMA = 2.5
 
-ILLUMINATION_RATIO = 25.0
 
-NDVI_VEGETATION = 0.15
-SHADOW_RUN_FRACTION = 0.2
 
-REDNESS_PAINT = 0.05
-BRIGHTNESS_MARKING = 165.0
 
-MARKING_MAX_WIDTH_M = 0.5
-MARKING_SMOOTH_M = 0.05
-MARKING_BASELINE_M = 1.0
-MARKING_MIN_EXCESS = 18.0
 
-ASPHALT = "asphalt"
-SHADOW_UNKNOWN = "unknown (shadow)"
 
 
 @dataclass
@@ -71,7 +73,7 @@ class CrossSection:
     runs: list[Run] = field(default_factory=list)
     shadow_fraction: float = 0.0
     shadow: np.ndarray | None = None
-    lane: np.ndarray | None = None  # the detected lane mask, sampled along this profile
+    lane: np.ndarray | None = None
 
     @property
     def material_edges(self) -> list[Edge]:

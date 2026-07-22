@@ -1,26 +1,3 @@
-"""Detect bike-lane centrelines from the imagery, for measure_bikelane_gap.
-
-The gap tool takes *road* locations from OSM, but bike-lane locations must come
-from the satellite imagery, never OSM: a lane OSM has not mapped, or has placed
-wrongly, would otherwise be invisible or measured against the wrong geometry.
-
-The lanes come from `BikeLaneEdgeDetector` (detection/edge_trace.py) -- the CNN
-coarse region plus classical colour edge tracing -- not the trained YOLO-seg
-model, whose recall on this project's sparse "sample" annotations is too low to
-find the real tracks (it misses the validated cycle track outright). The edge
-tracer already builds each lane as a constant-width band around a smoothed,
-bridged centreline, so here each detection is just reduced back to that
-centreline (`_binned_centerline`) for the gap tool to cut cross-sections along.
-
-Run on the *prefiltered* tile (data/output/*.tif): the detector keys on the
-red-boosted paint. Only the lane *location* comes from here; every gap distance
-is still measured from raw pixels in measure_bikelane_gap.
-
-Cost note: this runs the coarse CNN scan over the requested extent. Over a
-whole 5000x5000 tile that is ~20 min (see detect_roads / README); over a bounded
-window it is seconds. Pass a window for iteration.
-"""
-
 import geopandas as gpd
 import numpy as np
 import rasterio
@@ -121,8 +98,6 @@ def detect_lanes(
         points = _binned_centerline(detection.mask)
         if points is None:
             continue
-        # Only lanes that survived to a centreline go into the mask, so the
-        # two products describe the same set of lanes.
         mask |= detection.mask
         lines.append(LineString([transform * (col, row) for row, col in points]))
     return gpd.GeoDataFrame({"geometry": lines}, geometry="geometry", crs=TILE_CRS), mask

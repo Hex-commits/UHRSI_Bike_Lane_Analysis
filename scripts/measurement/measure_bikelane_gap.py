@@ -50,28 +50,24 @@ from scripts.measurement.cross_section import (
 from scripts.measurement.osm_road_surface import osm_road_surface, road_width_m
 from scripts.preprocessing.osm_features import fetch_osm_features
 from scripts.preprocessing.shadows import clean_shadow_mask, correct_shadows, detect_shadow_mask
+from pipeline.config import (
+    GAP_BEHIND_ROAD_M as BEHIND_ROAD_M,
+    GAP_BEYOND_LANE_M as BEYOND_LANE_M,
+    GAP_MAX_LANE_TO_ROAD_M as MAX_LANE_TO_ROAD_M,
+    GAP_MAX_ROAD_ANGLE_DEG as MAX_ROAD_ANGLE_DEG,
+    GAP_SECTION_INTERVAL_M as SECTION_INTERVAL_M,
+    GAP_SHADOW_CORRIDOR_M as SHADOW_CORRIDOR_M,
+    GAP_SHADOW_EDGE_MARGIN_M as SHADOW_EDGE_MARGIN_M,
+    GAP_TANGENT_HALF_SPAN_M as TANGENT_HALF_SPAN_M,
+)
 
 _STEM = PIPELINE_TILE_STEMS[0]
 RAW_TILE = raw_tile_path(_STEM)
 PREFILTERED_TILE = PREFILTERED_DIR / f"{_STEM}_bikelanes.tif"
 OUTPUT_DIR = GAP_OUTPUT_PATH.parent
 
-# The two things the maps draw flat, module-level so every figure that shows a
-# detected lane uses the same colour. The diagnostics edge-trace panel imports
-# LANE_COLOR from here rather than keeping its own copy, so the report's
-# figures cannot drift apart from the gap map's.
 ROAD_COLOR, LANE_COLOR = "#eda100", "#008300"
 
-# Every tunable lives in config.py; these are module-local aliases so the
-# code below reads in metres rather than in config lookups.
-SECTION_INTERVAL_M = GAP_SECTION_INTERVAL_M
-TANGENT_HALF_SPAN_M = GAP_TANGENT_HALF_SPAN_M
-MAX_LANE_TO_ROAD_M = GAP_MAX_LANE_TO_ROAD_M
-MAX_ROAD_ANGLE_DEG = GAP_MAX_ROAD_ANGLE_DEG
-BEHIND_ROAD_M = GAP_BEHIND_ROAD_M
-BEYOND_LANE_M = GAP_BEYOND_LANE_M
-SHADOW_EDGE_MARGIN_M = GAP_SHADOW_EDGE_MARGIN_M
-SHADOW_CORRIDOR_M = GAP_SHADOW_CORRIDOR_M
 
 
 def _tangent(geometry, distance_along: float):
@@ -204,11 +200,6 @@ def measure_gaps(bands, transform, bounds, shadow, near_edge, streets, lanes, la
 
                 if USE_OSM_ROAD_FALLBACK:
                     road_edge_m = road_width_m(street_highways[nearest_idx]) / 2.0
-                    # The lane's near edge comes from the detected lane mask,
-                    # not from `lane_run.start_m`. Where road and lane are the
-                    # same asphalt, segmentation merges them into one run whose
-                    # start is the profile's start, which collapsed every
-                    # separated cycle track to a spurious 0 m gap.
                     mask_edge_m = section.lane_edge_m(separation)
                     if mask_edge_m is None:
                         skipped["unresolved"] += 1
@@ -315,16 +306,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     from matplotlib.patches import Patch
 
     surface, ink, muted = "#fcfcfb", "#0b0b0b", "#52514e"
-    # The gap ramp is blue, so road and lane are deliberately non-blue: no
-    # step of a sequential ramp should be confusable with a categorical fill.
-    #
-    # The ramp runs dark->light because it sits on *dark* imagery: the anchor
-    # of a sequential scale flips with its surface, and the old ramp's deep
-    # end (#0d2f56) disappeared into the asphalt it was drawn over, taking
-    # the widest gaps -- the ones worth seeing -- with it. These five steps
-    # ascend in lightness by ~0.095 OKLCH each, above the 0.06 floor where
-    # neighbouring classes stop being tellable apart, and the darkest still
-    # clears the dimmed basemap at 2.9:1.
     RAMP_STEPS = ["#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]
     ramp = LinearSegmentedColormap.from_list("gap", RAMP_STEPS)
 
@@ -335,10 +316,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     if step > 1:
         rgb = rgb[::step, ::step]
 
-    # The imagery is context, not data: desaturated and dimmed hard, so the
-    # ramp has room to be bright above it. Every step of the scale has to
-    # clear whatever it lands on, and asphalt is the brightest thing under
-    # the ribbon.
     grey = rgb.mean(axis=2, keepdims=True)
     rgb = np.clip((rgb * 0.30 + grey * 0.70) * 0.34 + 0.04, 0, 1)
 
@@ -349,7 +326,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
         ax.set_position([0, 0, 1, 1])
     ax.imshow(rgb)
 
-    # --- the two things being compared, each one flat colour ---------------
     if GAP_MAP_SHOW_ROAD and streets is not None and not streets.empty:
         road = osm_road_surface(streets, transform, bands.shape[1:])[::step, ::step]
         ax.imshow(np.ma.masked_where(~road, road), cmap=ListedColormap([ROAD_COLOR]),
@@ -359,7 +335,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
         ax.imshow(np.ma.masked_where(~lane, lane), cmap=ListedColormap([LANE_COLOR]),
                   alpha=0.85, zorder=3, interpolation="nearest")
 
-    # --- the gap itself, carrying the scale --------------------------------
     breaks = list(GAP_MAP_BREAKS_M)
     binned = ListedColormap([ramp(i / (len(breaks) - 1)) for i in range(len(breaks))])
     norm = BoundaryNorm(breaks, binned.N, extend="max")
@@ -386,18 +361,13 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
         offsets = ordered.offset_m.to_numpy()
         anchors = np.array([g.coords[0] for g in ordered.geometry])
         for i in range(len(rows) - 1):
-            # Don't bridge a break in sampling with one long quad.
             if offsets[i + 1] - offsets[i] > SECTION_INTERVAL_M * 1.6:
                 continue
-            # Nor connect two cross-sections anchored to different roads --
-            # that quad spans the space between two streets, not a gap, and
-            # renders as a twist across the figure.
             if np.linalg.norm(anchors[i + 1] - anchors[i]) > SECTION_INTERVAL_M * 2.5:
                 continue
             a, b = edge_points(rows[i]), edge_points(rows[i + 1])
             if a is None or b is None:
                 continue
-            # road-edge_i -> lane-edge_i -> lane-edge_i+1 -> road-edge_i+1
             quads.append([a[0], a[1], b[1], b[0]])
             values.append(0.5 * (rows[i].gap_m + rows[i + 1].gap_m))
 
@@ -407,8 +377,6 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
         band.set_array(np.array(values))
         ax.add_collection(band)
         if bare:
-            # On the map, not beside it: a bar in the corner, its labels
-            # stroked in dark so they hold up over both imagery and ramp.
             cax = ax.inset_axes([0.015, 0.19, 0.30, 0.055], zorder=7)
             bar = fig.colorbar(band, cax=cax, orientation="horizontal",
                                spacing="uniform", ticks=breaks)
@@ -462,8 +430,6 @@ def main() -> None:
     osm = fetch_osm_features(bounds)
     clip = box(*bounds)
     streets = osm[osm.category == "street"].clip(clip)
-    # Same lane source as the pipeline: the cached detection where there is
-    # one, an in-process trace otherwise.
     cached_mask = BIKELANE_MASK_PATHS.get(_STEM)
     if USE_CACHED_BIKELANE_MASK and cached_mask and cached_mask.exists():
         lanes = lane_centerlines_from_mask(cached_mask, window)
@@ -497,10 +463,6 @@ def main() -> None:
               f"({precision['gsd_ratio']:.2f}x the {pixel_size_m:.1f} m GSD)")
 
     frame = gpd.GeoDataFrame(records, crs=TILE_CRS)
-    # Reported over every cross-section, matching the map. `reliable` and
-    # `shadow_fraction` are still written to the GeoPackage to filter on, but
-    # nothing is withheld for shadow: the road edge comes from the OSM class
-    # width, which shadow cannot obscure.
     print(f"\n{len(frame)} gaps measured")
     gaps = frame.gap_m.to_numpy()
     print(f"  gap: median {np.median(gaps):.2f} m, "
@@ -511,10 +473,6 @@ def main() -> None:
         subset = frame[frame.composition == kind].gap_m
         print(f"    {kind:18s} {count:5d}  median {subset.median():.2f} m")
 
-    # A windowed run writes window-suffixed filenames. Without this, a quick
-    # 140 m test overwrites the canonical whole-tile map and GeoPackage with
-    # a sliver of the district, and the only sign is that the "final result"
-    # silently got smaller -- which is exactly what happened once.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     suffix = ""
     if window is not None:

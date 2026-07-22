@@ -11,9 +11,6 @@ from scripts.preprocessing.tiles import union_bounds
 
 
 def main():
-    # Just the configured chunk, not every tile in the archive: the detect
-    # stage runs on INPUT_CHUNK_PATH alone, and prefiltering the other five
-    # tiles cost minutes to produce output nothing downstream reads.
     tile_paths = [INPUT_CHUNK_PATH]
     print(f"Prefiltering {INPUT_CHUNK_PATH.name}")
 
