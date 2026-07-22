@@ -7,7 +7,7 @@ pipeline change with:*
 uv run python -m scripts.diagnostics.generate_pipeline_report
 ```
 
-*Generated 2026-07-21 15:34 UTC from commit `7b2eea8`.*
+*Generated 2026-07-21 20:13 UTC from commit `7b2eea8`.*
 
 Every stage below runs on the same fixed example region:
 
@@ -115,11 +115,12 @@ coverage, when a detected surface is worse than a sensible per-class guess. The 
   highway-class width, at half-width along the cross-section, *not* from pixels. The lane edge and the
   separating strip between are still measured from the imagery, so the gap reads as the distance from
   the *assumed* road edge to the *measured* lane
-- **Reading the figure:** orange is the assumed road surface, green the detected bike lane -- both
-  flat, since they are identities, not magnitudes. The ribbon between them is the gap, and it alone
-  carries the blue scale inset at bottom left; **0 m** (light blue) means the assumed road reaches the
-  lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM, which
-  shadow cannot obscure, so nothing is withheld as unmeasurable
+- **Reading the figure:** green is the detected bike lane, flat, since it is an identity rather than a
+  magnitude. The ribbon running off it is the gap, and it alone carries the blue scale inset at bottom
+  left -- deep blue where the lane is flush with the road, brightening as the two pull apart, since a
+  scale on dark imagery has to ascend into light rather than into black. The ribbon's far edge is
+  where the assumed road was taken to end. The road surface itself is not drawn (`GAP_MAP_SHOW_ROAD`), since under the OSM fallback it is a class-width assumption, and drawn solid it reads as the most confident object on a map where it is the least measured one. Every cross-section is drawn: the road edge
+  comes from OSM, which shadow cannot obscure, so nothing is withheld as unmeasurable
 
 ![bikelane gap](figures/10_bikelane_gap.png)
 

@@ -165,9 +165,24 @@ GAP_SHADOW_CORRIDOR_M = 14.0
 # Colour breaks for the gap map, in metres. Quantised rather than linear:
 # the distribution is heavily skewed towards small gaps, so a linear ramp
 # spends most of its range on a few wide outliers and renders everything
-# under a metre as one indistinguishable pale blue. The first four bands are
-# all sub-metre by design.
-GAP_MAP_BREAKS_M = [0.0, 0.10, 0.25, 0.50, 1.00, 2.00, 4.00, 8.00]
+# under a metre as one indistinguishable pale blue.
+#
+# Five bands, not more, and that is a legibility limit rather than a
+# statistical one. The map is read at poster distance, where each class has
+# to be told from its neighbours by colour alone; a one-hue ramp bright
+# enough to sit on dark imagery spans about 0.47 of OKLCH lightness, so five
+# steps clear the 0.06 per-step separation floor and eight (the earlier
+# breaks, down to 0.10 m) came out at 0.047 -- a smooth gradient rather than
+# a scale. Sub-metre detail below 0.5 m therefore lives in the GeoPackage's
+# `gap_m` and `composition` fields, not in the map's colours.
+GAP_MAP_BREAKS_M = [0.0, 0.50, 1.00, 2.00, 4.00]
+
+# Whether the gap map draws the road surface it measured against. Off for
+# poster use: under USE_OSM_ROAD_FALLBACK the road is a class-width buffer,
+# an assumption rather than a detection, and drawn as a solid band it is the
+# largest, most confident-looking object on the map. Hiding it leaves the
+# lane and the measured ribbon, which are the parts read off pixels.
+GAP_MAP_SHOW_ROAD = False
 
 GAP_OUTPUT_PATH = PROJECT_ROOT / "data" / "detections" / "bikelane_gap.gpkg"
 GAP_MAP_PATH = PROJECT_ROOT / "data" / "detections" / "bikelane_gap_map.png"

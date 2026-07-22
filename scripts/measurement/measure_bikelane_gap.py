@@ -17,6 +17,7 @@ from pipeline.config import (
     GAP_BEYOND_LANE_M,
     GAP_MAP_BREAKS_M,
     GAP_MAP_PATH,
+    GAP_MAP_SHOW_ROAD,
     GAP_MAX_LANE_TO_ROAD_M,
     GAP_MAX_ROAD_ANGLE_DEG,
     GAP_EXCLUDED_ROAD_CLASSES,
@@ -288,6 +289,11 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     the wrong object: the reader saw a coloured lane and no indication of what
     it was measured against.
 
+    `GAP_MAP_SHOW_ROAD` can drop the road half of that pairing. It is off by
+    default while the road comes from an OSM class width: an assumption drawn
+    as a solid band is the most confident-looking object on the map, and the
+    ribbon's inner edge already shows where the road was taken to end.
+
     `bare` drops the title, legend and surrounding white margin, and moves the
     gap scale onto the map as an inset -- the form the pipeline report wants,
     where the surrounding prose already says what road and lane are and the
@@ -305,7 +311,16 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     surface, ink, muted = "#fcfcfb", "#0b0b0b", "#52514e"
     # The gap ramp is blue, so road and lane are deliberately non-blue: no
     # step of a sequential ramp should be confusable with a categorical fill.
-    ramp = LinearSegmentedColormap.from_list("gap", ["#9ec5ef", "#2a78d6", "#0d2f56"])
+    #
+    # The ramp runs dark->light because it sits on *dark* imagery: the anchor
+    # of a sequential scale flips with its surface, and the old ramp's deep
+    # end (#0d2f56) disappeared into the asphalt it was drawn over, taking
+    # the widest gaps -- the ones worth seeing -- with it. These five steps
+    # ascend in lightness by ~0.095 OKLCH each, above the 0.06 floor where
+    # neighbouring classes stop being tellable apart, and the darkest still
+    # clears the dimmed basemap at 2.9:1.
+    RAMP_STEPS = ["#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]
+    ramp = LinearSegmentedColormap.from_list("gap", RAMP_STEPS)
     ROAD_COLOR, LANE_COLOR = "#eda100", "#008300"
 
     inverse = ~transform
@@ -315,8 +330,12 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     if step > 1:
         rgb = rgb[::step, ::step]
 
+    # The imagery is context, not data: desaturated and dimmed hard, so the
+    # ramp has room to be bright above it. Every step of the scale has to
+    # clear whatever it lands on, and asphalt is the brightest thing under
+    # the ribbon.
     grey = rgb.mean(axis=2, keepdims=True)
-    rgb = np.clip((rgb * 0.35 + grey * 0.65) * 0.62 + 0.10, 0, 1)
+    rgb = np.clip((rgb * 0.30 + grey * 0.70) * 0.34 + 0.04, 0, 1)
 
     if bare:
         figsize = (figsize[0], figsize[0] * rgb.shape[0] / rgb.shape[1])
@@ -326,7 +345,7 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
     ax.imshow(rgb)
 
     # --- the two things being compared, each one flat colour ---------------
-    if streets is not None and not streets.empty:
+    if GAP_MAP_SHOW_ROAD and streets is not None and not streets.empty:
         road = osm_road_surface(streets, transform, bands.shape[1:])[::step, ::step]
         ax.imshow(np.ma.masked_where(~road, road), cmap=ListedColormap([ROAD_COLOR]),
                   alpha=0.55, zorder=2, interpolation="nearest")
@@ -385,12 +404,12 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
         if bare:
             # On the map, not beside it: a bar in the corner, its labels
             # stroked in dark so they hold up over both imagery and ramp.
-            cax = ax.inset_axes([0.015, 0.17, 0.26, 0.038], zorder=7)
+            cax = ax.inset_axes([0.015, 0.19, 0.30, 0.055], zorder=7)
             bar = fig.colorbar(band, cax=cax, orientation="horizontal",
                                spacing="uniform", ticks=breaks)
             bar.ax.set_xticklabels([f"{b:g}" for b in breaks])
-            bar.set_label("gap (m)", color=surface, fontsize=9, labelpad=3)
-            bar.ax.tick_params(colors=surface, labelsize=8, length=2, pad=2)
+            bar.set_label("gap (m)", color=surface, fontsize=13, labelpad=4)
+            bar.ax.tick_params(colors=surface, labelsize=12, length=2, pad=3)
             bar.outline.set_edgecolor(surface)
             stroke = [path_effects.withStroke(linewidth=2.2, foreground="#0b0b0b")]
             for text in [*bar.ax.get_xticklabels(), bar.ax.xaxis.label]:
@@ -404,10 +423,12 @@ def render_map(bands, transform, frame, lanes, out_path, pixel_size_m, figsize=(
             bar.outline.set_edgecolor("#d8d7d2")
 
     if not bare:
-        legend = ax.legend(handles=[
-            Patch(facecolor=ROAD_COLOR, alpha=0.55, label="road (OSM centreline, assumed class width)"),
-            Patch(facecolor=LANE_COLOR, alpha=0.85, label="bike lane (detected from imagery)"),
-        ], frameon=True, fontsize=9.5, labelcolor=ink, loc="lower left", borderpad=0.7)
+        handles = [Patch(facecolor=LANE_COLOR, alpha=0.85, label="bike lane (detected from imagery)")]
+        if GAP_MAP_SHOW_ROAD:
+            handles.insert(0, Patch(facecolor=ROAD_COLOR, alpha=0.55,
+                                    label="road (OSM centreline, assumed class width)"))
+        legend = ax.legend(handles=handles, frameon=True, fontsize=9.5,
+                           labelcolor=ink, loc="lower left", borderpad=0.7)
         legend.get_frame().set_facecolor(surface)
         legend.get_frame().set_edgecolor("#d8d7d2")
         legend.set_zorder(6)

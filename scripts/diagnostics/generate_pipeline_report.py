@@ -26,6 +26,7 @@ from shapely.geometry import box
 from pipeline.config import (
     PROJECT_ROOT,
     BIKELANE_MASK_PATHS,
+    GAP_MAP_SHOW_ROAD,
     INPUT_TILES_DIR,
     OUTPUT_DIR,
     TILE_CRS,
@@ -239,8 +240,12 @@ step after it moved the boundary a width would be taken from."""
 
 def _gap_bullets(road_is_osm: bool) -> str:
     """Section 9's intro bullets, reflecting where the road edge comes from."""
+    road_note = ("Orange is the road surface it was measured against." if GAP_MAP_SHOW_ROAD else
+                 "The road surface itself is not drawn (`GAP_MAP_SHOW_ROAD`), since under the OSM "
+                 "fallback it is a class-width assumption, and drawn solid it reads as the most "
+                 "confident object on a map where it is the least measured one.")
     if road_is_osm:
-        return """- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
+        return f"""- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile, at
   the imagery's own 0.2 m resolution -- see "Bike-lane gap" in `README.md`
 - **Bike lanes from imagery, not OSM:** lane centrelines are detected by the colour edge tracer
   (`detection/bikelane_centerlines.py`, the same trace as step 7), so a lane OSM never mapped is still
@@ -249,13 +254,14 @@ def _gap_bullets(road_is_osm: bool) -> str:
   highway-class width, at half-width along the cross-section, *not* from pixels. The lane edge and the
   separating strip between are still measured from the imagery, so the gap reads as the distance from
   the *assumed* road edge to the *measured* lane
-- **Reading the figure:** orange is the assumed road surface, green the detected bike lane -- both
-  flat, since they are identities, not magnitudes. The ribbon between them is the gap, and it alone
-  carries the blue scale inset at bottom left; **0 m** (light blue) means the assumed road reaches the
-  lane, with no strip between. Every cross-section is drawn: the road edge comes from OSM, which
-  shadow cannot obscure, so nothing is withheld as unmeasurable"""
+- **Reading the figure:** green is the detected bike lane, flat, since it is an identity rather than a
+  magnitude. The ribbon running off it is the gap, and it alone carries the blue scale inset at bottom
+  left -- deep blue where the lane is flush with the road, brightening as the two pull apart, since a
+  scale on dark imagery has to ascend into light rather than into black. The ribbon's far edge is
+  where the assumed road was taken to end. {road_note} Every cross-section is drawn: the road edge
+  comes from OSM, which shadow cannot obscure, so nothing is withheld as unmeasurable"""
 
-    return """- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
+    return f"""- **Orchestrator:** `scripts.measurement.measure_bikelane_gap`, measuring in 1-D directly on the **raw** tile (not
   the prefiltered output above), at the imagery's own 0.2 m resolution -- see "Bike-lane gap" in
   `README.md`
 - **Why not the mask:** the deliverable is a 1.5-3 m gap, and the coarse mask in step 8 is
@@ -264,10 +270,11 @@ def _gap_bullets(road_is_osm: bool) -> str:
 - **Sources:** bike-lane centrelines are detected from the imagery
   (`detection/bikelane_centerlines.py`, the same trace as step 7); OSM supplies only the *road*
   centerline -- where to cut and which way to face. Every edge, width and gap is read off pixels
-- **Reading the figure:** orange is the road surface, green the detected bike lane -- both flat, since
-  they are identities, not magnitudes. The ribbon between them is the gap, and it alone carries the
-  blue scale inset at bottom left; **0 m** (light blue) is a measured result -- the lane is flush with
-  or painted on the road, with no separating strip -- not a blank"""
+- **Reading the figure:** green is the detected bike lane, flat, since it is an identity rather than a
+  magnitude. The ribbon running off it is the gap, and it alone carries the blue scale inset at bottom
+  left -- deep blue where the lane is flush with the road, brightening as the two pull apart.
+  {road_note} **0 m** is a measured result -- the lane is painted on or flush with the road, with no
+  separating strip -- not a blank"""
 
 
 def _write_report(road_surface_px: int, road_components: int,
