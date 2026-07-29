@@ -38,6 +38,13 @@ uv run python -m pipeline.detect 1600 1600 1600 1600   # 320 m window, seconds
 
 Windowed runs write window-suffixed filenames, so they never overwrite the whole-tile result.
 
+
+### Related Works
+These papers did give a concept for this idea. 
+
+- [https://www.mdpi.com/2220-9964/14/4/135](https://www.mdpi.com/2220-9964/14/4/135)
+- [https://www.mdpi.com/2072-4292/17/18/3181](https://www.mdpi.com/2072-4292/17/18/3181)
+
 ### Optional tools
 
 Not part of the two-stage run — use them to inspect, diagnose, or measure something else.
