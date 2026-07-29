@@ -1,0 +1,6 @@
+path: /Users/jpwhex/Workspace/UHRSI_Bike_Lane_Analysis/data/training
+train: images/train
+val: images/val
+names:
+  0: Bikelane
+  1: bikeoverroad

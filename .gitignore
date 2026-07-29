@@ -10,10 +10,6 @@ cache/
 # the texture crops in particular *are* the texture detectors, since there
 # are no trained weights to fall back on, so a clone without them can't run
 # that half of the pipeline at all.
-data/osm/
-data/output/
-data/detections/
-data/training/
 
 # YOLO checkpoints (auto-downloaded) and training run output
 *.pt

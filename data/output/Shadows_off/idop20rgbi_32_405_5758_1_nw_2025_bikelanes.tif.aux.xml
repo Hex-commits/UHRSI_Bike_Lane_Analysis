@@ -1,0 +1,38 @@
+<PAMDataset>
+  <PAMRasterBand band="1">
+    <Metadata>
+      <MDI key="STATISTICS_APPROXIMATE">YES</MDI>
+      <MDI key="STATISTICS_MINIMUM">40</MDI>
+      <MDI key="STATISTICS_MAXIMUM">255</MDI>
+      <MDI key="STATISTICS_MEAN">116.42942806447</MDI>
+      <MDI key="STATISTICS_STDDEV">32.561048386653</MDI>
+      <MDI key="STATISTICS_VALID_PERCENT">30.99</MDI>
+    </Metadata>
+  </PAMRasterBand>
+  <PAMRasterBand band="2">
+    <Metadata>
+      <MDI key="STATISTICS_APPROXIMATE">YES</MDI>
+      <MDI key="STATISTICS_MINIMUM">47</MDI>
+      <MDI key="STATISTICS_MAXIMUM">255</MDI>
+      <MDI key="STATISTICS_MEAN">119.39092561928</MDI>
+      <MDI key="STATISTICS_STDDEV">30.084750608494</MDI>
+      <MDI key="STATISTICS_VALID_PERCENT">30.99</MDI>
+    </Metadata>
+  </PAMRasterBand>
+  <PAMRasterBand band="3">
+    <Metadata>
+      <MDI key="STATISTICS_APPROXIMATE">YES</MDI>
+      <MDI key="STATISTICS_MINIMUM">51</MDI>
+      <MDI key="STATISTICS_MAXIMUM">255</MDI>
+      <MDI key="STATISTICS_MEAN">119.94452413388</MDI>
+      <MDI key="STATISTICS_STDDEV">27.594509572253</MDI>
+      <MDI key="STATISTICS_VALID_PERCENT">30.99</MDI>
+    </Metadata>
+  </PAMRasterBand>
+  <PAMRasterBand band="5">
+    <Description>classification: 0=background, 1=bikelane, 2=street</Description>
+  </PAMRasterBand>
+  <PAMRasterBand band="6">
+    <Description>shadow: 0=not shadowed, 1=shadowed</Description>
+  </PAMRasterBand>
+</PAMDataset>
